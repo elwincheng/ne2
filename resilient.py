@@ -289,12 +289,13 @@ if __name__ == "__main__":
     continue_run = False
     
     if not continue_run:
-        os.remove("error_data.txt")
-        os.remove("position_data.txt")
-        os.remove("last_state.txt")
-    else:
-        # TODO: Add code here if you want to continue from where we left off.
-        pass
+        if os.path.exists("error_data.txt"):
+            os.remove("error_data.txt")
+        if os.path.exists("position_data.txt"):
+            os.remove("position_data.txt")
+        if os.path.exists("last_state.txt"):
+            os.remove("last_state.txt")
+
 
     sim_config = simulation_config()
     
