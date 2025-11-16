@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from scipy.linalg import block_diag
+import cProfile
 
 import info_robust_graph as irg
 
@@ -92,7 +93,6 @@ class Resilient:
         self.A, self.b = self.get_gradient()
 
         self.F = block_diag(*[self.A[2*i:2*(i+1),:] for i in range(self.N)])
-        self.RF = self.R.transpose().dot(self.F)
         self.RB = self.R.transpose().dot(self.b)
         self.NE = -np.linalg.inv(self.A).dot(self.b)
 
@@ -206,7 +206,9 @@ class Resilient:
             
             state_y = self.adversarial_communication(state_x)
             state_v = self.filter_communicated_message(state_y)
-            state_x = state_v - self.sim_config.step_size*(self.RF.dot(state_v)+self.RB)
+            temp1 = self.F.dot(state_v)
+            temp2 = self.R.transpose().dot(temp1)
+            state_x = state_v - self.sim_config.step_size*(temp2+self.RB)
 
             records.append(np.linalg.norm(self.NE-self.R.dot(state_x),2))
             pos_records.append(self.R.dot(state_x))
@@ -307,8 +309,8 @@ if __name__ == "__main__":
     # These are the old examples I used.
     # game = Resilient(sim_config, grid_width = 4, random_agents=None, constant_agents=None, l_inf_ball=1)
     # game = Resilient(sim_config, grid_width = 10, random_agents=set([4, 6, 11, 19, 26, 32, 38, 41]), constant_agents=None, l_inf_ball=2) # Fails
-    # game = Resilient(sim_config, grid_width = 10, random_agents=set([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), constant_agents=None, l_inf_ball=2, D=3, corner_size = 1)
-    game = Resilient(sim_config, grid_width = 4, random_agents=random_agents, constant_agents=constant_agents, l_inf_ball=1)
+    game = Resilient(sim_config, grid_width = 10, random_agents=set([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), constant_agents=None, l_inf_ball=2, D=3, corner_size = 1)
+    # game = Resilient(sim_config, grid_width = 4, random_agents=random_agents, constant_agents=constant_agents, l_inf_ball=1)
 
     # These are other examples where I wanted to make Gc != Go. 
     # grid_width = 10; game = Resilient(sim_config, grid_width = grid_width, random_agents=set([0,3,6,28,31,34,37,58,61,64,67,89,92,95]), constant_agents=None, l_inf_ball=1, D=1, corner_size = 1)
@@ -321,6 +323,6 @@ if __name__ == "__main__":
     # game.Go[grid_width**2 - 2, grid_width**2 - grid_width -1], game.Go[grid_width**2 - grid_width -1, grid_width**2 - 2] = 1,1
     # game.Go = irg.remove_nodes_from_adj_matrix(game.Go, irg.get_corners(game.Go, 1))
     
-    main(game, sim_config)
+    cProfile.run('main(game, sim_config)', sort='cumulative')
 
     plot_save_file_data(selected, adversarial)
