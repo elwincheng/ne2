@@ -67,6 +67,15 @@ class PlotErrorFigure(object):
         save_plot(self.figure, self.name)
         plt.close()
 
+def adjlist_to_csr(adj_list_gc, N):
+    offsets = np.zeros(N + 1, dtype=np.int64)
+    neighbors = []
+    for i in range(N):
+        offsets[i+1] = offsets[i] + len(adj_list_gc[i])
+        neighbors.extend(adj_list_gc[i])
+    return offsets, np.asarray(neighbors, dtype=np.int64)
+
+
 class Resilient:
     """Simulation for the resilient algorithm"""
     def __init__(self, sim_config, grid_width, random_agents=None, constant_agents=None, l_inf_ball = 1, D = 1, corner_size = 1):
@@ -89,6 +98,8 @@ class Resilient:
         self.Gc = irg.remove_nodes_from_adj_matrix(self.Gc, self.corners)
         self.Go = self.Gc + np.eye(self.N, dtype=int)
         self.adj_list_gc = irg.adj_matrix_to_adj_in_set(self.Gc, self_loop=False)
+        self.offsets, self.neighbors = adjlist_to_csr(self.adj_list_gc, self.N)
+
 
         self.R = action_select_matrix(self.dim_action_list)
         self.A, self.b = self.get_gradient()
@@ -177,8 +188,8 @@ class Resilient:
                         state_v[state_index_i] = state_y[state_index_j,state_j]
                     else:
                         agent_i_in_messages = [ state_y[self.dim_action*X + offset, agent_i] for X in self.adj_list_gc[agent_i]]
-                        state_v[state_index_i] = remove_d.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i], self.D)
-                        #state_v[state_index_i] = self.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i])
+                        #state_v[state_index_i] = remove_d.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i], self.D)
+                        state_v[state_index_i] = self.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i])
 
         return state_v
 
@@ -207,7 +218,11 @@ class Resilient:
                 print(f"Iteration {i} of {self.sim_config.num_iter}")
             
             state_y = self.adversarial_communication(state_x)
-            state_v = self.filter_communicated_message(state_y)
+            #state_v = self.filter_communicated_message(state_y)
+            state_v = remove_d.filter_communicated_message(state_y, self.Go, self.offsets, self.neighbors, self.D)
+            #if (i%100) == 0:
+            #    print(np.max(np.abs(state_v - state_v_binding)))
+
             temp1 = self.F.dot(state_v)
             temp2 = self.R.transpose().dot(temp1)
             state_x = state_v - self.sim_config.step_size*(temp2+self.RB)
