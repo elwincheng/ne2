@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 '''Running the more complex resilient simulation'''
 import os
+import remove_d
 
 from random import random
 from typing import List
@@ -176,7 +177,8 @@ class Resilient:
                         state_v[state_index_i] = state_y[state_index_j,state_j]
                     else:
                         agent_i_in_messages = [ state_y[self.dim_action*X + offset, agent_i] for X in self.adj_list_gc[agent_i]]
-                        state_v[state_index_i] = self.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i])
+                        state_v[state_index_i] = remove_d.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i], self.D)
+                        #state_v[state_index_i] = self.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i])
 
         return state_v
 
