@@ -127,6 +127,7 @@ py::array_t<double> filter_communicated_message_cpp(py::array state_y,
 
     // Main loops: receiver agent_i, target state_j, component_k
     // Writes into V at row=state_index_i, col=0
+    #pragma omp parallel for schedule(static)
     for (int64_t agent_i = 0; agent_i < N; ++agent_i) {
         const int64_t off0 = OFF[agent_i];
         const int64_t off1 = OFF[agent_i + 1];

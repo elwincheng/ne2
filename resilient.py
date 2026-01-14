@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 '''Running the more complex resilient simulation'''
 import os
+os.environ["OMP_NUM_THREADS"] = "8"
+
 import remove_d
 
 from random import random
@@ -326,7 +328,7 @@ if __name__ == "__main__":
     # These are the old examples I used.
     # game = Resilient(sim_config, grid_width = 4, random_agents=None, constant_agents=None, l_inf_ball=1)
     # game = Resilient(sim_config, grid_width = 10, random_agents=set([4, 6, 11, 19, 26, 32, 38, 41]), constant_agents=None, l_inf_ball=2) # Fails
-    game = Resilient(sim_config, grid_width = 10, random_agents=set([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), constant_agents=None, l_inf_ball=2, D=3, corner_size = 1)
+    game = Resilient(sim_config, grid_width = 15, random_agents=set([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), constant_agents=None, l_inf_ball=2, D=3, corner_size = 1)
     # game = Resilient(sim_config, grid_width = 4, random_agents=random_agents, constant_agents=constant_agents, l_inf_ball=1)
 
     # These are other examples where I wanted to make Gc != Go. 

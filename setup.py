@@ -11,6 +11,8 @@ ext_modules = [
         #    extra_compile_args=["/std:c++14"]
         # else:
         #    extra_compile_args=["-std=c++14"],
+        extra_compile_args=["-O3", "-std=c++17", "-fopenmp"],
+        extra_link_args=["-fopenmp"],
     ),
 ]
 
