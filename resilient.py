@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 '''Running the more complex resilient simulation'''
 import os
@@ -27,8 +27,10 @@ class simulation_config:
     num_rounds: int = 1
     init_state: np.ndarray = None
     # Adaptive step size configuration
-    step_method: Literal['constant', 'adagrad', 'rmsprop', 'adam'] = 'constant'
+    step_method: Literal['constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam', 'accelerated'] = 'constant'
     adaptive_base_lr: float = 0.1
+    # Accelerated GRANE (Nesterov-style): momentum for state extrapolation
+    accelerated_momentum: float = 0.9
 
 def action_select_matrix(dim_action_list: List[int]) -> np.ndarray:
     '''Given the dim of each agent's action return the action select matrix, i.e., the R matrix'''
@@ -122,7 +124,7 @@ class Resilient:
 
     def _init_step_controller(self):
         """Initialize the adaptive step size controller based on config"""
-        if self.sim_config.step_method == 'constant':
+        if self.sim_config.step_method in ('constant', 'accelerated'):
             self.step_controller = None
         else:
             self.step_controller = create_controller(
@@ -131,19 +133,23 @@ class Resilient:
                 base_lr=self.sim_config.adaptive_base_lr
             )
     
-    def set_step_method(self, method: str, base_lr: float = 0.1):
+    def set_step_method(self, method: str, base_lr: float = 0.1, momentum: Optional[float] = None):
         """
         Change the step size method dynamically.
         
         Parameters
         ----------
         method : str
-            One of 'constant', 'adagrad', 'rmsprop', 'adam'
+            One of 'constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam', 'accelerated'
         base_lr : float
-            Base learning rate for adaptive methods
+            Base learning rate for adaptive methods; for 'accelerated' this is the step size.
+        momentum : float, optional
+            For 'accelerated' only: Nesterov momentum (default from config, typically 0.9).
         """
         self.sim_config.step_method = method
         self.sim_config.adaptive_base_lr = base_lr
+        if momentum is not None and method == 'accelerated':
+            self.sim_config.accelerated_momentum = momentum
         self._init_step_controller()
 
     def block_diag(self):
@@ -270,6 +276,11 @@ class Resilient:
         if self.step_controller is not None:
             self.step_controller.reset()
         
+        # For accelerated GRANE: Nesterov extrapolation on filtered state
+        state_v_prev = None
+        alpha = self.sim_config.adaptive_base_lr if self.sim_config.step_method == 'accelerated' else self.sim_config.step_size
+        beta = self.sim_config.accelerated_momentum
+        
         for i in range(self.sim_config.num_iter):
             if verbose and (i%100) == 0:
                 print(f"Iteration {i} of {self.sim_config.num_iter}, error: {records[-1]:.6f}")
@@ -277,23 +288,29 @@ class Resilient:
             state_y = self.adversarial_communication(state_x)
             state_v = remove_d.filter_communicated_message(state_y, self.Go, self.offsets, self.neighbors, self.D)
 
-            # Compute gradient
-            temp1 = self.F.dot(state_v)
-            temp2 = self.R.transpose().dot(temp1)
-            gradients = temp2 + self.RB
-            
-            # Apply step size (constant or adaptive)
-            if self.step_controller is None:
-                # Use constant step size (original behavior)
-                state_x = state_v - self.sim_config.step_size * gradients
-            elif self.sim_config.step_method == 'adam':
-                # Use Adam's full update (includes momentum)
-                update = self.step_controller.get_adam_update(gradients)
-                state_x = state_v - update
+            if self.sim_config.step_method == 'accelerated':
+                # Accelerated GRANE: extrapolate filtered state, gradient at extrapolated point, then update
+                if state_v_prev is None:
+                    y = state_v
+                else:
+                    y = state_v + beta * (state_v - state_v_prev)
+                # Gradient at extrapolated state y (no extra communication)
+                temp1 = self.F.dot(y)
+                temp2 = self.R.transpose().dot(temp1)
+                gradients = temp2 + self.RB
+                state_x = y - alpha * gradients
+                state_v_prev = state_v
             else:
-                # Use adaptive step sizes (AdaGrad, RMSProp)
-                step_sizes = self.step_controller.get_step_sizes(gradients)
-                state_x = state_v - step_sizes * gradients
+                # Compute gradient at current filtered state
+                temp1 = self.F.dot(state_v)
+                temp2 = self.R.transpose().dot(temp1)
+                gradients = temp2 + self.RB
+                # Apply step size (constant or adaptive)
+                if self.step_controller is None:
+                    state_x = state_v - self.sim_config.step_size * gradients
+                else:
+                    update = self.step_controller.get_update(gradients)
+                    state_x = state_v - update
 
             records.append(np.linalg.norm(self.NE-self.R.dot(state_x),2))
             pos_records.append(self.R.dot(state_x))
@@ -369,6 +386,8 @@ def compare_step_methods(game, init_state, methods=None, num_iter=1000):
             game.sim_config.step_size = base_lr
             game.step_controller = None
             game.sim_config.step_method = 'constant'
+        elif method == 'accelerated':
+            game.set_step_method('accelerated', base_lr)
         else:
             game.set_step_method(method, base_lr)
         
@@ -471,11 +490,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Resilient Nash Equilibrium Seeking Simulation')
     parser.add_argument('--mode', choices=['original', 'compare', 'adaptive'], default='original',
                         help='Run mode: original (fixed step), compare (benchmark methods), adaptive (use adaptive)')
-    parser.add_argument('--step-method', choices=['constant', 'adagrad', 'rmsprop', 'adam'], default='adam',
-                        help='Step method to use in adaptive mode')
-    parser.add_argument('--base-lr', type=float, default=0.1, help='Base learning rate for adaptive methods')
+    parser.add_argument('--step-method', choices=['constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam', 'accelerated'], default='adam',
+                        help='Step method to use in adaptive mode (accelerated = Nesterov GRANE)')
+    parser.add_argument('--base-lr', type=float, default=0.1, help='Base learning rate / step size for adaptive and accelerated methods')
+    parser.add_argument('--momentum', type=float, default=0.9, help='Momentum for accelerated (Nesterov) method')
     parser.add_argument('--num-iter', type=int, default=1000, help='Number of iterations')
-    parser.add_argument('--grid-width', type=int, default=15, help='Grid width for the network')
+    parser.add_argument('--grid-width', type=int, default=10, help='Grid width for the network')
     parser.add_argument('--profile', action='store_true', help='Run with cProfile')
     args = parser.parse_args()
     
@@ -518,12 +538,13 @@ if __name__ == "__main__":
         
         init_state = -7 + 14*np.random.rand(game.dim_state, 1)
         
-        # Compare different methods
+        # Compare different methods (accelerated = Nesterov-style GRANE)
         methods = [
             ('constant', 0.025),   # Original fixed step size
-            ('adagrad', 0.3),
-            ('rmsprop', 0.05),
-            ('adam', 0.05)
+            ('accelerated', 0.05), # Accelerated GRANE (Nesterov on filtered state)
+            ('adam', 0.1),
+            ('amsgrad', 0.1),
+            ('nadam', 0.1)
         ]
         
         results = compare_step_methods(game, init_state, methods=methods, num_iter=args.num_iter)
@@ -541,9 +562,12 @@ if __name__ == "__main__":
                                    save_path="convergence_comparison")
         
     elif args.mode == 'adaptive':
-        # Run with specified adaptive method
+        # Run with specified adaptive or accelerated method
         print(f"\nRunning with {args.step_method} (base_lr={args.base_lr})")
-        game.set_step_method(args.step_method, args.base_lr)
+        if args.step_method == 'accelerated':
+            game.set_step_method(args.step_method, args.base_lr, momentum=args.momentum)
+        else:
+            game.set_step_method(args.step_method, args.base_lr)
         
         if args.profile:
             cProfile.run('main(game, sim_config)', sort='cumulative')

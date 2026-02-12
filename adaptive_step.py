@@ -12,6 +12,8 @@ Available methods:
 - AdaGrad: Adapts step sizes based on accumulated squared gradients
 - RMSProp: Uses exponential moving average of squared gradients
 - Adam: Combines momentum with adaptive learning rates
+- AMSGrad: Adam with max of second moments (often more stable; better convergence guarantees)
+- NAdam: Adam with Nesterov momentum (often faster convergence in practice)
 - Constant: Baseline fixed step size for comparison
 """
 
@@ -19,11 +21,12 @@ from typing import Literal, Optional
 from dataclasses import dataclass
 import numpy as np
 
+MethodType = Literal['constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam']
 
 @dataclass
 class AdaptiveStepConfig:
     """Configuration for adaptive step size controllers"""
-    method: Literal['constant', 'adagrad', 'rmsprop', 'adam'] = 'adam'
+    method: MethodType = 'adam'
     base_lr: float = 0.1
     epsilon: float = 1e-8
     # RMSProp/Adam decay rate for squared gradients
@@ -81,11 +84,13 @@ class AdaptiveStepController:
             # Exponential moving average of squared gradients
             self.grad_sq_ema = np.zeros(shape)
             
-        elif self.config.method == 'adam':
+        elif self.config.method in ('adam', 'amsgrad', 'nadam'):
             # First moment (momentum)
             self.m = np.zeros(shape)
             # Second moment (squared gradients)
             self.v = np.zeros(shape)
+            if self.config.method == 'amsgrad':
+                self.v_max = np.zeros(shape)  # element-wise max of v_hat over time
     
     def reset(self):
         """Reset internal state (useful for new simulation runs)"""
@@ -116,6 +121,9 @@ class AdaptiveStepController:
             return self._rmsprop_step(gradients)
         elif self.config.method == 'adam':
             return self._adam_step(gradients)
+        elif self.config.method in ('amsgrad', 'nadam'):
+            # These use get_*_update() instead
+            raise NotImplementedError(f"{self.config.method} uses get_update(), not get_step_sizes()")
         else:
             raise ValueError(f"Unknown method: {self.config.method}")
     
@@ -211,8 +219,68 @@ class AdaptiveStepController:
         v_hat = self.v / (1 - self.config.beta2 ** self.t)
         
         # Compute and return the update
-        update = self.config.base_lr * m_hat / (np.sqrt(v_hat) + self.config.epsilon)
+        effective_lr = self.config.base_lr
+        update = effective_lr * m_hat / (np.sqrt(v_hat) + self.config.epsilon)
         return update
+
+    def get_amsgrad_update(self, gradients: np.ndarray) -> np.ndarray:
+        """
+        AMSGrad (Reddi et al.): Adam with non-decreasing second-moment estimate.
+        
+        Uses v_max = max(v_max, v_hat) element-wise so effective step sizes
+        do not increase over time. Often more stable and better convergence
+        guarantees than Adam, especially for convex or well-behaved objectives.
+        """
+        self.t += 1
+        self.m = self.config.beta1 * self.m + (1 - self.config.beta1) * gradients
+        self.v = self.config.beta2 * self.v + (1 - self.config.beta2) * gradients ** 2
+        m_hat = self.m / (1 - self.config.beta1 ** self.t)
+        v_hat = self.v / (1 - self.config.beta2 ** self.t)
+        self.v_max = np.maximum(self.v_max, v_hat)
+        update = self.config.base_lr * m_hat / (np.sqrt(self.v_max) + self.config.epsilon)
+        return update
+
+    def get_nadam_update(self, gradients: np.ndarray) -> np.ndarray:
+        """
+        NAdam: Adam with Nesterov momentum.
+        
+        Uses a look-ahead momentum direction (Nesterov-style) in the update.
+        Often converges faster in practice than Adam with similar stability.
+        """
+        self.t += 1
+        self.m = self.config.beta1 * self.m + (1 - self.config.beta1) * gradients
+        self.v = self.config.beta2 * self.v + (1 - self.config.beta2) * gradients ** 2
+        m_hat = self.m / (1 - self.config.beta1 ** self.t)
+        v_hat = self.v / (1 - self.config.beta2 ** self.t)
+        # Nesterov: use beta1 * m_hat + (1-beta1)*g in place of m_hat (simplified NAdam)
+        m_nadam = self.config.beta1 * m_hat + (1 - self.config.beta1) * gradients
+        update = self.config.base_lr * m_nadam / (np.sqrt(v_hat) + self.config.epsilon)
+        return update
+
+    def get_update(self, gradients: np.ndarray) -> np.ndarray:
+        """
+        Return the full update vector to subtract from the state (unified interface).
+        
+        For momentum-based methods (Adam, AMSGrad, NAdam) returns the full update.
+        For step-size-only methods (constant, AdaGrad, RMSProp) returns step_sizes * gradients.
+        """
+        if self.config.method == 'constant':
+            return self.config.base_lr * gradients
+        if self.config.method == 'adagrad':
+            self.t += 1
+            step = self._adagrad_step(gradients)
+            return step * gradients
+        if self.config.method == 'rmsprop':
+            self.t += 1
+            step = self._rmsprop_step(gradients)
+            return step * gradients
+        if self.config.method == 'adam':
+            return self.get_adam_update(gradients)
+        if self.config.method == 'amsgrad':
+            return self.get_amsgrad_update(gradients)
+        if self.config.method == 'nadam':
+            return self.get_nadam_update(gradients)
+        raise ValueError(f"Unknown method: {self.config.method}")
 
 
 def create_controller(dim_state: int, 
@@ -227,7 +295,7 @@ def create_controller(dim_state: int,
     dim_state : int
         Dimension of the state vector
     method : str
-        One of 'constant', 'adagrad', 'rmsprop', 'adam'
+        One of 'constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam'
     base_lr : float
         Base learning rate
     **kwargs
