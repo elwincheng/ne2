@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.linalg import block_diag
 import cProfile
 
@@ -438,6 +439,152 @@ def plot_convergence_comparison(results, title="Step Method Comparison", save_pa
     return figure
 
 
+def animate_position_comparison(game, init_state, num_iter=500, save_path=None, frame_skip=10):
+    """
+    Animate agent positions over time: constant vs Nesterov, side by side.
+    
+    Parameters
+    ----------
+    game : Resilient
+        The game instance
+    init_state : np.ndarray
+        Initial state (same for both methods)
+    num_iter : int
+        Number of iterations to run
+    save_path : str, optional
+        If provided, save animation to this path (.gif)
+    frame_skip : int
+        Plot every frame_skip-th iteration (reduces frame count for faster animation)
+    """
+    methods = [('constant', 0.025), ('accelerated', 0.05)]
+    pos_records = {}
+    err_records = {}
+    
+    original_num_iter = game.sim_config.num_iter
+    game.sim_config.num_iter = num_iter
+    
+    for method, base_lr in methods:
+        print(f"Running {method} (lr={base_lr}) for animation...")
+        if method == 'constant':
+            game.sim_config.step_size = base_lr
+            game.step_controller = None
+            game.sim_config.step_method = 'constant'
+        else:
+            game.set_step_method('accelerated', base_lr)
+        err_rec, pos_rec, _ = game.iterate_algo(init_state.copy(), verbose=False)
+        pos_records[method] = pos_rec
+        err_records[method] = err_rec
+    
+    game.sim_config.num_iter = original_num_iter
+    
+    # Subsample frames
+    indices = list(range(0, num_iter + 1, frame_skip))
+    if indices[-1] != num_iter:
+        indices.append(num_iter)
+    
+    N = game.N
+    NE = game.NE
+    adversarial = game.random_agents | game.constant_agents
+    honest = [i for i in range(N) if i not in adversarial]
+    
+    # Shared axis limits from full trajectory
+    all_x = []
+    all_y = []
+    for pos_rec in pos_records.values():
+        for pos in pos_rec:
+            p = np.reshape(pos, (-1,))
+            for i in range(N):
+                all_x.append(p[2*i])
+                all_y.append(p[2*i+1])
+    x_min, x_max = min(all_x), max(all_x)
+    y_min, y_max = min(all_y), max(all_y)
+    margin = 0.1 * max(x_max - x_min, y_max - y_min, 1)
+    x_min -= margin
+    x_max += margin
+    y_min -= margin
+    y_max += margin
+    
+    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(12, 6))
+    
+    # NE positions (red dots)
+    ne_flat = np.ravel(NE)
+    ne_x = [float(ne_flat[2*i]) for i in range(N)]
+    ne_y = [float(ne_flat[2*i+1]) for i in range(N)]
+    
+    scat_left_honest = ax_left.scatter([], [], c='blue', s=20, alpha=0.7, label='Honest')
+    scat_left_adv = ax_left.scatter([], [], c='red', s=30, alpha=0.8, marker='s', label='Adversarial')
+    scat_right_honest = ax_right.scatter([], [], c='orange', s=20, alpha=0.7, label='Honest')
+    scat_right_adv = ax_right.scatter([], [], c='red', s=30, alpha=0.8, marker='s', label='Adversarial')
+    ax_left.scatter(ne_x, ne_y, c='darkgreen', s=30, marker='x', label='NE')
+    ax_right.scatter(ne_x, ne_y, c='darkgreen', s=30, marker='x', label='NE')
+    
+    for ax in (ax_left, ax_right):
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.legend(loc='upper right', fontsize=8)
+    
+    ax_left.set_title('Constant (α=0.025)')
+    ax_right.set_title('Nesterov (α=0.05, β=0.9)')
+    
+    title_text = fig.suptitle('', fontsize=12)
+    
+    def init():
+        scat_left_honest.set_offsets(np.empty((0, 2)))
+        scat_left_adv.set_offsets(np.empty((0, 2)))
+        scat_right_honest.set_offsets(np.empty((0, 2)))
+        scat_right_adv.set_offsets(np.empty((0, 2)))
+        return scat_left_honest, scat_left_adv, scat_right_honest, scat_right_adv, title_text
+    
+    def update(frame_idx):
+        k = indices[min(frame_idx, len(indices) - 1)]
+        
+        pos_const = np.reshape(pos_records['constant'][k], (-1,))
+        pos_accel = np.reshape(pos_records['accelerated'][k], (-1,))
+        
+        x_const_h = [pos_const[2*i] for i in honest]
+        y_const_h = [pos_const[2*i+1] for i in honest]
+        x_const_a = [pos_const[2*i] for i in adversarial]
+        y_const_a = [pos_const[2*i+1] for i in adversarial]
+        x_accel_h = [pos_accel[2*i] for i in honest]
+        y_accel_h = [pos_accel[2*i+1] for i in honest]
+        x_accel_a = [pos_accel[2*i] for i in adversarial]
+        y_accel_a = [pos_accel[2*i+1] for i in adversarial]
+        
+        scat_left_honest.set_offsets(np.c_[x_const_h, y_const_h] if honest else np.empty((0, 2)))
+        scat_left_adv.set_offsets(np.c_[x_const_a, y_const_a] if adversarial else np.empty((0, 2)))
+        scat_right_honest.set_offsets(np.c_[x_accel_h, y_accel_h] if honest else np.empty((0, 2)))
+        scat_right_adv.set_offsets(np.c_[x_accel_a, y_accel_a] if adversarial else np.empty((0, 2)))
+        
+        err_const = err_records['constant'][k]
+        err_accel = err_records['accelerated'][k]
+        title_text.set_text(f'Iteration {k}  |  Constant error: {err_const:.2e}  |  Nesterov error: {err_accel:.2e}')
+        
+        return scat_left_honest, scat_left_adv, scat_right_honest, scat_right_adv, title_text
+    
+    n_frames = len(indices)
+    anim = FuncAnimation(fig, update, init_func=init, frames=n_frames, interval=80,
+                        blit=True)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        if not save_path.endswith('.gif'):
+            save_path = save_path + '.gif'
+        print(f"Saving animation to {save_path}...")
+        writer = PillowWriter(fps=15)
+        anim.save(save_path, writer=writer)
+        print("Done.")
+    else:
+        plt.show()
+    
+    plt.close()
+    return anim
+
+
 def plot_save_file_data(selected, adversarial):
     pos_records = []
     with open('position_data.txt') as f:
@@ -488,8 +635,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Resilient Nash Equilibrium Seeking Simulation')
-    parser.add_argument('--mode', choices=['original', 'compare', 'adaptive'], default='original',
-                        help='Run mode: original (fixed step), compare (benchmark methods), adaptive (use adaptive)')
+    parser.add_argument('--mode', choices=['original', 'compare', 'adaptive', 'animate'], default='original',
+                        help='Run mode: original, compare, adaptive, or animate (constant vs Nesterov)')
     parser.add_argument('--step-method', choices=['constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam', 'accelerated'], default='adam',
                         help='Step method to use in adaptive mode (accelerated = Nesterov GRANE)')
     parser.add_argument('--base-lr', type=float, default=0.1, help='Base learning rate / step size for adaptive and accelerated methods')
@@ -497,6 +644,9 @@ if __name__ == "__main__":
     parser.add_argument('--num-iter', type=int, default=1000, help='Number of iterations')
     parser.add_argument('--grid-width', type=int, default=10, help='Grid width for the network')
     parser.add_argument('--profile', action='store_true', help='Run with cProfile')
+    parser.add_argument('--save-animation', type=str, default=None, metavar='PATH',
+                        help='Save animation to PATH (e.g. animation.gif). Use MPLBACKEND=Agg for headless.')
+    parser.add_argument('--frame-skip', type=int, default=10, help='Animation: plot every Nth iteration (default 10)')
     args = parser.parse_args()
     
     continue_run = False
@@ -525,6 +675,10 @@ if __name__ == "__main__":
         game = Resilient(sim_config, grid_width=10,
                         random_agents=set([4, 6, 11, 19, 26, 32, 38, 41]),
                         constant_agents=None, l_inf_ball=2, D=2, corner_size=1)
+    elif args.grid_width == 6:
+        game = Resilient(sim_config, grid_width=6,
+                        random_agents=set([4, 6, 11, 16, 24, 25, 28, 30]),
+                        constant_agents=None, l_inf_ball=2, D=2, corner_size=1)
     else:
         game = Resilient(sim_config, grid_width=args.grid_width, 
                         random_agents=None, constant_agents=None, 
@@ -541,10 +695,10 @@ if __name__ == "__main__":
         # Compare different methods (accelerated = Nesterov-style GRANE)
         methods = [
             ('constant', 0.025),   # Original fixed step size
-            ('accelerated', 0.05), # Accelerated GRANE (Nesterov on filtered state)
-            ('adam', 0.1),
-            ('amsgrad', 0.1),
-            ('nadam', 0.1)
+            ('accelerated', 0.025), # Accelerated GRANE (Nesterov on filtered state)
+            # ('adam', 0.1),
+            # ('amsgrad', 0.1),
+            # ('nadam', 0.1)
         ]
         
         results = compare_step_methods(game, init_state, methods=methods, num_iter=args.num_iter)
@@ -560,6 +714,19 @@ if __name__ == "__main__":
         plot_convergence_comparison(results, 
                                    title=f"Step Method Comparison (grid={args.grid_width}, iter={args.num_iter})",
                                    save_path="convergence_comparison")
+        
+    elif args.mode == 'animate':
+        # Animate constant vs Nesterov position comparison
+        print("\n" + "="*60)
+        print("ANIMATING: Constant vs Nesterov")
+        print("="*60)
+        init_state = -7 + 14*np.random.rand(game.dim_state, 1)
+        animate_position_comparison(
+            game, init_state,
+            num_iter=args.num_iter,
+            save_path=args.save_animation,
+            frame_skip=args.frame_skip
+        )
         
     elif args.mode == 'adaptive':
         # Run with specified adaptive or accelerated method
