@@ -17,6 +17,8 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.linalg import block_diag
 import cProfile
 
+import networkx as nx
+
 import info_robust_graph as irg
 from adaptive_step import AdaptiveStepController, AdaptiveStepConfig, create_controller
 
@@ -32,6 +34,8 @@ class simulation_config:
     adaptive_base_lr: float = 0.1
     # Accelerated GRANE (Nesterov-style): momentum for state extrapolation
     accelerated_momentum: float = 0.9
+    num_iter: int = 1000
+    graph_switch_period: int = 100
 
 def action_select_matrix(dim_action_list: List[int]) -> np.ndarray:
     '''Given the dim of each agent's action return the action select matrix, i.e., the R matrix'''
@@ -118,10 +122,123 @@ class Resilient:
         self.NE = -np.linalg.inv(self.A).dot(self.b)
 
         self.example = 'position_plot'
+
+        self.l_inf_ball = l_inf_ball
+        self.graph_switch_period = sim_config.graph_switch_period  # e.g., 1000 or None
+        self.rng = np.random.default_rng(420)
         
         # Initialize adaptive step controller
         self.step_controller = None
         self._init_step_controller()
+
+    def update_graph(self, iteration, desired_kappa=1, max_tries=50):
+        """
+        Switches between Grid and Ring topologies while ensuring info-robustness.
+        """
+        def generate_ring_adj_matrix(num_nodes, num_jumps):
+            """
+            Generates a random circulant graph.
+            - num_jumps: number of unique 'distances' each node connects to.
+            """
+            adj = np.zeros((num_nodes, num_nodes), dtype=int)
+            
+            # 1. Pick unique random jump distances (offsets)
+            # We pick from 1 to floor(N/2) to avoid redundant edges in undirected graphs
+            possible_jumps = list(range(1, num_nodes // 2))
+            jumps = self.rng.choice(possible_jumps, size=num_jumps, replace=False)
+            
+            # 2. Build the basic circulant structure
+            for i in range(num_nodes):
+                for s in jumps:
+                    j_left = (i - s) % num_nodes
+                    j_right = (i + s) % num_nodes
+                    adj[i, j_left] = 1
+                    adj[i, j_right] = 1
+                    
+            # 3. Randomize the "look" by shuffling node indices (Graph Isomorphism)
+            perm = np.random.permutation(num_nodes)
+            adj = adj[perm, :]
+            adj = adj[:, perm]
+            
+            return adj
+
+        for attempt in range(max_tries):
+            # Decide randomly: 0 for Grid, 1 for Ring
+            graph_type = self.rng.choice(['grid', 'ring', 'ring'])
+            
+            if graph_type == 'grid':
+                r = self.rng.choice([1, 2])
+                G_full = irg.grid_l_inf_to_adj_matrix(self.grid_width, r)
+                Gc = irg.remove_nodes_from_adj_matrix(G_full, self.corners)
+            
+            else: # Ring Topology
+                # Start with a radius that has a chance of meeting kappa
+                # A ring with radius 'r' is 2r-connected
+                min_radius = int(np.ceil(desired_kappa / 2))
+                r = self.rng.integers(min_radius, min_radius + 2)
+                Gc = generate_ring_adj_matrix(self.N, r)
+
+            # Ensure undirected and no self-loops for the robustness check
+            Gc = np.maximum(Gc, Gc.T)
+            np.fill_diagonal(Gc, 0)
+
+            # Check info robustness
+            kappa = irg.get_k_info_robust(Gc, Gc)
+            if kappa >= desired_kappa:
+                print(f"[iter {iteration}] Accepted {graph_type} graph (kappa={kappa})")
+                self.Gc = Gc
+                self.Go = Gc + np.eye(self.N)
+                self.adj_list_gc = irg.adj_matrix_to_adj_in_set(self.Gc, self_loop=False)
+                return
+
+        raise RuntimeError(f"Failed to find a {desired_kappa}-robust graph after {max_tries} tries.")
+
+    def visualize_graph(self, iteration: int):
+        """Generates a PDF plot of the current communication graph using the iteration count."""
+        # 1. Convert adjacency matrix to a NetworkX graph
+        G = nx.from_numpy_array(self.Gc)
+        
+        # 2. Compute physical grid positions based on your grid logic
+        pos = {}
+        node_idx = 0
+        end = self.grid_width - 1
+        
+        for row in range(self.grid_width):
+            for col in range(self.grid_width):
+                is_corner = (
+                    (row < self.corner_size and col < self.corner_size) or
+                    (row < self.corner_size and col > end - self.corner_size) or
+                    (row > end - self.corner_size and col < self.corner_size) or
+                    (row > end - self.corner_size and col > end - self.corner_size)
+                )
+                
+                if not is_corner:
+                    # Map grid coordinates to plot coordinates
+                    pos[node_idx] = (col, end - row)
+                    node_idx += 1
+
+        # 3. Create the figure
+        fig = plt.figure(figsize=(7, 7))
+        plt.title(f"Communication Graph - Iteration {iteration}")
+        
+        # 4. Identify adversarial agents for color-coding
+        adversarial_nodes = set(self.random_agents) | set(self.constant_agents)
+        node_colors = ['#ff7f0e' if node in adversarial_nodes else '#1f77b4' for node in G.nodes()]
+        
+        # 5. Draw
+        nx.draw(G, pos, 
+                with_labels=True, 
+                node_color=node_colors, 
+                node_size=500, 
+                edge_color='gray',
+                alpha=0.8,
+                font_size=9,
+                font_color='white')
+        
+        # 6. Save with zero-padded iteration for easy sorting (e.g., graph_0100.pdf)
+        filename = f"graph_plots/graph_iter_{iteration:04d}.pdf"
+        fig.savefig(filename, format='pdf', bbox_inches='tight')
+        plt.close(fig)
 
     def _init_step_controller(self):
         """Initialize the adaptive step size controller based on config"""
@@ -281,6 +398,9 @@ class Resilient:
         state_v_prev = None
         alpha = self.sim_config.adaptive_base_lr if self.sim_config.step_method == 'accelerated' else self.sim_config.step_size
         beta = self.sim_config.accelerated_momentum
+
+        # visualize the communication graph
+        self.visualize_graph(0)
         
         for i in range(self.sim_config.num_iter):
             if verbose and (i%100) == 0:
@@ -288,6 +408,11 @@ class Resilient:
             
             state_y = self.adversarial_communication(state_x)
             state_v = remove_d.filter_communicated_message(state_y, self.Go, self.offsets, self.neighbors, self.D)
+
+            # Change the graph topology and visualize in the form of a pdf
+            if self.graph_switch_period and i > 0 and (i % self.graph_switch_period == 0):
+                self.update_graph(i, desired_kappa=2 * self.D + 1)  # or kappa=2 if required
+                self.visualize_graph(i)
 
             if self.sim_config.step_method == 'accelerated':
                 # Accelerated GRANE: extrapolate filtered state, gradient at extrapolated point, then update
@@ -678,7 +803,7 @@ if __name__ == "__main__":
     elif args.grid_width == 6:
         game = Resilient(sim_config, grid_width=6,
                         random_agents=set([4, 6, 11, 16, 24, 25, 28, 30]),
-                        constant_agents=None, l_inf_ball=2, D=2, corner_size=1)
+                        constant_agents=None, l_inf_ball=1, D=1, corner_size=1)
     else:
         game = Resilient(sim_config, grid_width=args.grid_width, 
                         random_agents=None, constant_agents=None, 
@@ -752,4 +877,33 @@ if __name__ == "__main__":
         else:
             main(game, sim_config)
         
+        from pypdf import PdfWriter
+        import glob
+
+        def consolidate_graphs_to_pdf(output_filename="simulation_report.pdf"):
+            """Merges all iteration graph PDFs into a single multi-page document."""
+            writer = PdfWriter()
+            
+            # Grab all graph files and sort them alphabetically
+            files = sorted(glob.glob("graph_plots/graph_iter_*.pdf"))
+            
+            if not files:
+                print("No graph PDFs found to consolidate.")
+                return
+
+            print(f"Consolidating {len(files)} graphs into {output_filename}...")
+            
+            for file in files:
+                writer.append(file)
+            
+            with open(output_filename, "wb") as f:
+                writer.write(f)
+                
+            print("Consolidation complete.")
+
+            # Optional: Clean up the individual files to keep your workspace tidy
+            # for file in files:
+            #     os.remove(file)
+
+        consolidate_graphs_to_pdf("topology_evolution.pdf")
         plot_save_file_data(selected, adversarial)
