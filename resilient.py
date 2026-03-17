@@ -189,6 +189,7 @@ class Resilient:
                 self.Gc = Gc
                 self.Go = Gc + np.eye(self.N)
                 self.adj_list_gc = irg.adj_matrix_to_adj_in_set(self.Gc, self_loop=False)
+                self.offsets, self.neighbors = adjlist_to_csr(self.adj_list_gc, self.N)
                 return
 
         raise RuntimeError(f"Failed to find a {desired_kappa}-robust graph after {max_tries} tries.")
@@ -380,7 +381,9 @@ class Resilient:
         Returns
         -------
         tuple
-            (error_records, position_records, final_state)
+            (error_records, position_records, graph_history, final_state)
+            graph_history is a list of (iteration, Gc_copy) tuples recorded
+            at initialization and each topology switch.
         """
         state_x = init_state
         if verbose:
@@ -389,6 +392,7 @@ class Resilient:
         
         records = [np.linalg.norm(self.NE-self.R.dot(state_x),2)]
         pos_records = [self.R.dot(state_x)]
+        graph_history = [(0, self.Gc.copy())]
         
         # Reset adaptive controller if using one
         if self.step_controller is not None:
@@ -411,8 +415,9 @@ class Resilient:
 
             # Change the graph topology and visualize in the form of a pdf
             if self.graph_switch_period and i > 0 and (i % self.graph_switch_period == 0):
-                self.update_graph(i, desired_kappa=2 * self.D + 1)  # or kappa=2 if required
+                self.update_graph(i, desired_kappa=2 * self.D + 1)
                 self.visualize_graph(i)
+                graph_history.append((i, self.Gc.copy()))
 
             if self.sim_config.step_method == 'accelerated':
                 # Accelerated GRANE: extrapolate filtered state, gradient at extrapolated point, then update
@@ -441,7 +446,7 @@ class Resilient:
             records.append(np.linalg.norm(self.NE-self.R.dot(state_x),2))
             pos_records.append(self.R.dot(state_x))
 
-        return records, pos_records, state_x
+        return records, pos_records, graph_history, state_x
 
     def position_plot(self, pos_record, save=False, index_set = None, adversarial=None):
         figure = plt.figure()
@@ -517,7 +522,7 @@ def compare_step_methods(game, init_state, methods=None, num_iter=1000):
         else:
             game.set_step_method(method, base_lr)
         
-        err_record, _, _ = game.iterate_algo(init_state.copy(), verbose=True)
+        err_record, _, _, _ = game.iterate_algo(init_state.copy(), verbose=True)
         results[f"{method}_lr{base_lr}"] = err_record
         
         # Report convergence stats
@@ -596,7 +601,7 @@ def animate_position_comparison(game, init_state, num_iter=500, save_path=None, 
             game.sim_config.step_method = 'constant'
         else:
             game.set_step_method('accelerated', base_lr)
-        err_rec, pos_rec, _ = game.iterate_algo(init_state.copy(), verbose=False)
+        err_rec, pos_rec, _, _ = game.iterate_algo(init_state.copy(), verbose=False)
         pos_records[method] = pos_rec
         err_records[method] = err_rec
     
@@ -710,6 +715,193 @@ def animate_position_comparison(game, init_state, num_iter=500, save_path=None, 
     return anim
 
 
+def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None, frame_skip=10):
+    """
+    Animate agent positions converging to NE alongside the time-varying communication graph.
+
+    Left panel: communication graph with edges updating at each topology switch.
+    Right panel: agent positions in 2D action space with trajectory tails.
+
+    Parameters
+    ----------
+    game : Resilient
+        The game instance (will be run once with its current step method)
+    init_state : np.ndarray
+        Initial state vector
+    num_iter : int
+        Number of algorithm iterations
+    save_path : str, optional
+        Save animation as .gif to this path
+    frame_skip : int
+        Show every N-th iteration as a frame
+    """
+    from matplotlib.collections import LineCollection
+
+    original_num_iter = game.sim_config.num_iter
+    game.sim_config.num_iter = num_iter
+
+    print(f"Running simulation ({game.sim_config.step_method}, {num_iter} iters) for animation...")
+    err_rec, pos_rec, graph_history, _ = game.iterate_algo(init_state.copy(), verbose=True)
+
+    game.sim_config.num_iter = original_num_iter
+
+    # Subsample frame indices
+    indices = list(range(0, num_iter + 1, frame_skip))
+    if indices[-1] != num_iter:
+        indices.append(num_iter)
+
+    N = game.N
+    NE = game.NE
+    adversarial = game.random_agents | game.constant_agents
+    honest = [i for i in range(N) if i not in adversarial]
+    tail_length = max(20, 2 * frame_skip)
+
+    # Fixed node positions for the graph panel (grid layout, same as visualize_graph)
+    graph_pos = {}
+    node_idx = 0
+    end = game.grid_width - 1
+    for row in range(game.grid_width):
+        for col in range(game.grid_width):
+            is_corner = (
+                (row < game.corner_size and col < game.corner_size) or
+                (row < game.corner_size and col > end - game.corner_size) or
+                (row > end - game.corner_size and col < game.corner_size) or
+                (row > end - game.corner_size and col > end - game.corner_size)
+            )
+            if not is_corner:
+                graph_pos[node_idx] = (col, end - row)
+                node_idx += 1
+
+    # Precompute axis limits for the position panel
+    all_x, all_y = [], []
+    for pos in pos_rec:
+        p = np.ravel(pos)
+        for i in range(N):
+            all_x.append(p[2 * i])
+            all_y.append(p[2 * i + 1])
+    x_min, x_max = min(all_x), max(all_x)
+    y_min, y_max = min(all_y), max(all_y)
+    margin = 0.1 * max(x_max - x_min, y_max - y_min, 1)
+    x_min -= margin; x_max += margin
+    y_min -= margin; y_max += margin
+
+    ne_flat = np.ravel(NE)
+
+    # Build a lookup: for a given iteration, which graph_history entry is active?
+    def get_graph_for_iter(k):
+        active_gc = graph_history[0][1]
+        for switch_iter, gc in graph_history:
+            if switch_iter <= k:
+                active_gc = gc
+            else:
+                break
+        return active_gc
+
+    # --- Figure setup ---
+    fig, (ax_graph, ax_pos) = plt.subplots(1, 2, figsize=(14, 6))
+    fig.subplots_adjust(wspace=0.30)
+
+    # Graph panel -- static node scatter drawn once, edges redrawn each frame
+    graph_pos_arr = np.array([graph_pos[i] for i in range(N)])
+    node_colors_graph = ['#ff7f0e' if i in adversarial else '#1f77b4' for i in range(N)]
+    ax_graph.scatter(graph_pos_arr[:, 0], graph_pos_arr[:, 1],
+                     c=node_colors_graph, s=120, zorder=5, edgecolors='white', linewidths=0.5)
+    for i in range(N):
+        ax_graph.annotate(str(i), graph_pos[i], fontsize=5, ha='center', va='center',
+                          color='white', zorder=6)
+    ax_graph.set_xlim(-0.5, end + 0.5)
+    ax_graph.set_ylim(-0.5, end + 0.5)
+    ax_graph.set_aspect('equal')
+    ax_graph.set_title('Communication Graph')
+    ax_graph.set_xlabel('Grid column')
+    ax_graph.set_ylabel('Grid row')
+
+    edge_collection = LineCollection([], colors='gray', linewidths=0.4, alpha=0.5, zorder=1)
+    ax_graph.add_collection(edge_collection)
+    graph_title = ax_graph.text(0.5, 1.06, '', transform=ax_graph.transAxes,
+                                ha='center', fontsize=9)
+
+    # Position panel
+    ax_pos.scatter([float(ne_flat[2 * i]) for i in range(N)],
+                   [float(ne_flat[2 * i + 1]) for i in range(N)],
+                   c='darkgreen', s=40, marker='x', label='NE', zorder=5)
+    scat_honest = ax_pos.scatter([], [], c='#1f77b4', s=25, alpha=0.8, label='Honest', zorder=4)
+    scat_adv = ax_pos.scatter([], [], c='#ff7f0e', s=35, alpha=0.8, marker='s', label='Adversarial', zorder=4)
+
+    trail_lines_honest = [ax_pos.plot([], [], color='#1f77b4', alpha=0.25, linewidth=0.6)[0] for _ in honest]
+    trail_lines_adv = [ax_pos.plot([], [], color='#ff7f0e', alpha=0.25, linewidth=0.6, linestyle='--')[0] for _ in adversarial]
+
+    ax_pos.set_xlim(x_min, x_max)
+    ax_pos.set_ylim(y_min, y_max)
+    ax_pos.set_aspect('equal')
+    ax_pos.grid(True, alpha=0.2)
+    ax_pos.set_xlabel('x coordinate')
+    ax_pos.set_ylabel('y coordinate')
+    ax_pos.set_title('Agent Positions')
+    ax_pos.legend(loc='upper right', fontsize=7)
+
+    title_text = fig.suptitle('', fontsize=11, y=0.98)
+
+    def _edges_from_gc(gc):
+        segments = []
+        for i in range(N):
+            for j in range(i + 1, N):
+                if gc[i, j]:
+                    segments.append([graph_pos[i], graph_pos[j]])
+        return segments
+
+    def update(frame_idx):
+        k = indices[min(frame_idx, len(indices) - 1)]
+
+        # --- Update graph panel edges ---
+        gc = get_graph_for_iter(k)
+        edge_collection.set_segments(_edges_from_gc(gc))
+        num_edges = int(np.sum(gc) / 2)
+        graph_title.set_text(f'Edges: {num_edges}')
+
+        # --- Update position panel ---
+        p = np.ravel(pos_rec[k])
+        hx = [p[2 * i] for i in honest]
+        hy = [p[2 * i + 1] for i in honest]
+        ax_ = [p[2 * i] for i in adversarial]
+        ay = [p[2 * i + 1] for i in adversarial]
+        scat_honest.set_offsets(np.c_[hx, hy] if honest else np.empty((0, 2)))
+        scat_adv.set_offsets(np.c_[ax_, ay] if adversarial else np.empty((0, 2)))
+
+        # Trajectory tails
+        start = max(0, k - tail_length)
+        for idx_h, agent in enumerate(honest):
+            xs = [float(np.ravel(pos_rec[t])[2 * agent]) for t in range(start, k + 1)]
+            ys = [float(np.ravel(pos_rec[t])[2 * agent + 1]) for t in range(start, k + 1)]
+            trail_lines_honest[idx_h].set_data(xs, ys)
+        for idx_a, agent in enumerate(adversarial):
+            xs = [float(np.ravel(pos_rec[t])[2 * agent]) for t in range(start, k + 1)]
+            ys = [float(np.ravel(pos_rec[t])[2 * agent + 1]) for t in range(start, k + 1)]
+            trail_lines_adv[idx_a].set_data(xs, ys)
+
+        err = err_rec[k]
+        title_text.set_text(f'Iteration {k}/{num_iter}  |  Error: {err:.3e}')
+
+        return (edge_collection, scat_honest, scat_adv, graph_title, title_text,
+                *trail_lines_honest, *trail_lines_adv)
+
+    n_frames = len(indices)
+    anim = FuncAnimation(fig, update, frames=n_frames, interval=100, blit=True)
+
+    if save_path:
+        if not save_path.endswith('.gif'):
+            save_path += '.gif'
+        print(f"Saving animation to {save_path} ({n_frames} frames)...")
+        writer = PillowWriter(fps=12)
+        anim.save(save_path, writer=writer)
+        print("Done.")
+    else:
+        plt.show()
+
+    plt.close()
+    return anim
+
+
 def plot_save_file_data(selected, adversarial):
     pos_records = []
     with open('position_data.txt') as f:
@@ -732,7 +924,7 @@ def main(game, sim_config):
     init_state = -7 + 14*np.random.rand(game.dim_state,1)
     for i in range(sim_config.num_rounds):
         print(f'Executing round: {i} / {sim_config.num_rounds}')
-        err_record, pos_record, last_iter = game.iterate_algo(init_state)
+        err_record, pos_record, _, last_iter = game.iterate_algo(init_state)
 
         # Writing the results to a file because the run time can be long.
         # If the program crashes or needs to stop then the simulation can
@@ -760,8 +952,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Resilient Nash Equilibrium Seeking Simulation')
-    parser.add_argument('--mode', choices=['original', 'compare', 'adaptive', 'animate'], default='original',
-                        help='Run mode: original, compare, adaptive, or animate (constant vs Nesterov)')
+    parser.add_argument('--mode', choices=['original', 'compare', 'adaptive', 'animate', 'animate-graph'], default='original',
+                        help='Run mode: original, compare, adaptive, animate (constant vs Nesterov), or animate-graph (trajectory + topology)')
     parser.add_argument('--step-method', choices=['constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam', 'accelerated'], default='adam',
                         help='Step method to use in adaptive mode (accelerated = Nesterov GRANE)')
     parser.add_argument('--base-lr', type=float, default=0.1, help='Base learning rate / step size for adaptive and accelerated methods')
@@ -794,7 +986,7 @@ if __name__ == "__main__":
     # Create game instance
     if args.grid_width == 15:
         game = Resilient(sim_config, grid_width=15, 
-                        random_agents=set([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), 
+                        random_agents=set[int]([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), 
                         constant_agents=None, l_inf_ball=2, D=3, corner_size=1)
     elif args.grid_width == 10:
         game = Resilient(sim_config, grid_width=10,
@@ -853,6 +1045,22 @@ if __name__ == "__main__":
             frame_skip=args.frame_skip
         )
         
+    elif args.mode == 'animate-graph':
+        print("\n" + "="*60)
+        print("ANIMATING: Trajectory + Time-Varying Graph")
+        print("="*60)
+        init_state = -7 + 14*np.random.rand(game.dim_state, 1)
+
+        if args.step_method != 'constant':
+            game.set_step_method(args.step_method, args.base_lr, momentum=args.momentum)
+
+        animate_trajectory_with_graph(
+            game, init_state,
+            num_iter=args.num_iter,
+            save_path=args.save_animation,
+            frame_skip=args.frame_skip
+        )
+
     elif args.mode == 'adaptive':
         # Run with specified adaptive or accelerated method
         print(f"\nRunning with {args.step_method} (base_lr={args.base_lr})")
