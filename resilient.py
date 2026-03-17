@@ -7,6 +7,7 @@ os.environ["OMP_NUM_THREADS"] = "8"
 import remove_d
 
 from random import random
+import random as pyrandom
 from typing import List, Literal, Optional
 from dataclasses import dataclass, field
 
@@ -36,6 +37,7 @@ class simulation_config:
     accelerated_momentum: float = 0.9
     num_iter: int = 1000
     graph_switch_period: int = 100
+    seed: int = 420
 
 def action_select_matrix(dim_action_list: List[int]) -> np.ndarray:
     '''Given the dim of each agent's action return the action select matrix, i.e., the R matrix'''
@@ -125,7 +127,7 @@ class Resilient:
 
         self.l_inf_ball = l_inf_ball
         self.graph_switch_period = sim_config.graph_switch_period  # e.g., 1000 or None
-        self.rng = np.random.default_rng(420)
+        self.rng = np.random.default_rng(sim_config.seed)
         
         # Initialize adaptive step controller
         self.step_controller = None
@@ -156,7 +158,7 @@ class Resilient:
                     adj[i, j_right] = 1
                     
             # 3. Randomize the "look" by shuffling node indices (Graph Isomorphism)
-            perm = np.random.permutation(num_nodes)
+            perm = self.rng.permutation(num_nodes)
             adj = adj[perm, :]
             adj = adj[:, perm]
             
@@ -358,7 +360,7 @@ class Resilient:
         state_y = np.kron(state_x, np.ones([1,self.N]))
 
         for agent in self.random_agents:
-            state_y[agent*dim:(agent + 1)*dim,:] = state_y[agent*dim:(agent + 1)*dim,:] + np.random.normal(0,1,[dim,self.N])
+            state_y[agent*dim:(agent + 1)*dim,:] = state_y[agent*dim:(agent + 1)*dim,:] + self.rng.normal(0, 1, size=(dim, self.N))
             state_y[agent*dim:(agent + 1)*dim,agent] = state_x[agent*dim:(agent+1)*dim].transpose()[0]
         for agent in self.constant_agents:
             state_y[agent*dim:(agent + 1)*dim,:] = np.ones([dim,self.N])
@@ -729,7 +731,7 @@ def plot_save_file_data(selected, adversarial):
 
 def main(game, sim_config):
     '''main function to run the examples'''
-    init_state = -7 + 14*np.random.rand(game.dim_state,1)
+    init_state = -7 + 14*game.rng.random((game.dim_state, 1))
     for i in range(sim_config.num_rounds):
         print(f'Executing round: {i} / {sim_config.num_rounds}')
         err_record, pos_record, last_iter = game.iterate_algo(init_state)
@@ -772,7 +774,11 @@ if __name__ == "__main__":
     parser.add_argument('--save-animation', type=str, default=None, metavar='PATH',
                         help='Save animation to PATH (e.g. animation.gif). Use MPLBACKEND=Agg for headless.')
     parser.add_argument('--frame-skip', type=int, default=10, help='Animation: plot every Nth iteration (default 10)')
+    parser.add_argument('--seed', type=int, default=420, help='Random seed for reproducible experiments')
     args = parser.parse_args()
+
+    pyrandom.seed(args.seed)
+    np.random.seed(args.seed)
     
     continue_run = False
     
@@ -784,7 +790,7 @@ if __name__ == "__main__":
         if os.path.exists("last_state.txt"):
             os.remove("last_state.txt")
 
-    sim_config = simulation_config(num_iter=args.num_iter)
+    sim_config = simulation_config(num_iter=args.num_iter, seed=args.seed)
     
     selected = [0,1,2,3,4,5,6,7,8,9,10,11]
     random_agents = []
@@ -815,7 +821,7 @@ if __name__ == "__main__":
         print("COMPARING STEP SIZE METHODS")
         print("="*60)
         
-        init_state = -7 + 14*np.random.rand(game.dim_state, 1)
+        init_state = -7 + 14*game.rng.random((game.dim_state, 1))
         
         # Compare different methods (accelerated = Nesterov-style GRANE)
         methods = [
@@ -845,7 +851,7 @@ if __name__ == "__main__":
         print("\n" + "="*60)
         print("ANIMATING: Constant vs Nesterov")
         print("="*60)
-        init_state = -7 + 14*np.random.rand(game.dim_state, 1)
+        init_state = -7 + 14*game.rng.random((game.dim_state, 1))
         animate_position_comparison(
             game, init_state,
             num_iter=args.num_iter,
