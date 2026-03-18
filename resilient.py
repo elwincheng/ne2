@@ -32,8 +32,8 @@ class simulation_config:
     # Adaptive step size configuration
     step_method: Literal['constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam', 'accelerated'] = 'constant'
     adaptive_base_lr: float = 0.1
-    # Accelerated GRANE (Nesterov-style): momentum for state extrapolation
-    accelerated_momentum: float = 0.9
+    # Accelerated GRANE (Nesterov-style): momentum for state extrapolation (0.7 tuned for stability with topology changes)
+    accelerated_momentum: float = 0.7
     num_iter: int = 1000
     graph_switch_period: int = 100
 
@@ -203,6 +203,15 @@ class Resilient:
                 return
 
         raise RuntimeError(f"Failed to find a {desired_kappa}-robust graph after {max_tries} tries.")
+
+    def _any_agent_neighbors_changed(self, prev_adj_list: list) -> bool:
+        """True if any agent's neighbor set changed (per-agent local observation)."""
+        if prev_adj_list is None:
+            return False
+        for i in range(self.N):
+            if frozenset(self.adj_list_gc[i]) != frozenset(prev_adj_list[i]):
+                return True
+        return False
 
     def visualize_graph(self, iteration: int):
         """Generates a PDF plot of the current communication graph using the iteration count."""
@@ -426,6 +435,10 @@ class Resilient:
         alpha = self.sim_config.adaptive_base_lr if self.sim_config.step_method == 'accelerated' else self.sim_config.step_size
         beta = self.sim_config.accelerated_momentum
 
+        # Per-agent neighbor detection (no global graph access)
+        prev_adj_list = None
+        step_dampening_active = False
+
         # visualize the communication graph
         self.visualize_graph(0)
         
@@ -442,6 +455,19 @@ class Resilient:
                 self.visualize_graph(i)
                 graph_history.append((i, self.Gc.copy()))
 
+            # Per-agent neighbor detection: did any agent's neighbors change?
+            topology_changed = self._any_agent_neighbors_changed(prev_adj_list)
+            prev_adj_list = [set(n) for n in self.adj_list_gc]
+
+            if topology_changed:
+                if self.sim_config.step_method == 'accelerated':
+                    state_v_prev = None
+                    step_dampening_active = True
+                elif self.step_controller is not None:
+                    step_dampening_active = True
+                elif self.sim_config.step_method == 'constant':
+                    step_dampening_active = True
+
             if self.sim_config.step_method == 'accelerated':
                 # Accelerated GRANE: extrapolate filtered state, gradient at extrapolated point, then update
                 if state_v_prev is None:
@@ -452,8 +478,14 @@ class Resilient:
                 temp1 = self.F.dot(y)
                 temp2 = self.R.transpose().dot(temp1)
                 gradients = temp2 + self.RB
-                state_x = y - alpha * gradients
-                state_v_prev = state_v
+                alpha_eff = 0.5 * alpha if step_dampening_active else alpha
+                if step_dampening_active:
+                    step_dampening_active = False
+                state_x = y - alpha_eff * gradients
+                # Do not update state_v_prev when topology changed: current state_v used old graph,
+                # next iteration's state_v will use new graph; keeping None avoids mixing filter topologies
+                if not topology_changed:
+                    state_v_prev = state_v
             else:
                 # Compute gradient at current filtered state
                 temp1 = self.F.dot(state_v)
@@ -461,13 +493,25 @@ class Resilient:
                 gradients = temp2 + self.RB
                 # Apply step size (constant or adaptive)
                 if self.step_controller is None:
-                    state_x = state_v - self.sim_config.step_size * gradients
+                    step_size = (0.5 * self.sim_config.step_size if step_dampening_active
+                                 else self.sim_config.step_size)
+                    if step_dampening_active:
+                        step_dampening_active = False
+                    state_x = state_v - step_size * gradients
                 else:
                     update = self.step_controller.get_update(gradients)
+                    if step_dampening_active:
+                        update = 0.5 * update
+                        step_dampening_active = False
                     state_x = state_v - update
 
             records.append(np.linalg.norm(self.NE-self.R.dot(state_x),2))
             pos_records.append(self.R.dot(state_x))
+
+            # Adaptive restart: reset momentum when error increases by >10% (avoid small-noise resets)
+            if (self.sim_config.step_method == 'accelerated' and len(records) >= 2
+                    and records[-1] > 1.1 * records[-2]):
+                state_v_prev = None
 
         return records, pos_records, graph_history, state_x
 
@@ -1047,7 +1091,7 @@ if __name__ == "__main__":
     parser.add_argument('--step-method', choices=['constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam', 'accelerated'], default='adam',
                         help='Step method to use in adaptive mode (accelerated = Nesterov GRANE)')
     parser.add_argument('--base-lr', type=float, default=0.1, help='Base learning rate / step size for adaptive and accelerated methods')
-    parser.add_argument('--momentum', type=float, default=0.9, help='Momentum for accelerated (Nesterov) method')
+    parser.add_argument('--momentum', type=float, default=0.7, help='Momentum for accelerated (Nesterov) method (0.7 tuned for topology stability)')
     parser.add_argument('--num-iter', type=int, default=1000, help='Number of iterations')
     parser.add_argument('--grid-width', type=int, default=10, help='Grid width for the network')
     parser.add_argument('--profile', action='store_true', help='Run with cProfile')
@@ -1103,9 +1147,11 @@ if __name__ == "__main__":
         methods = [
             ('constant', 0.025),   # Original fixed step size
             ('accelerated', 0.025), # Accelerated GRANE (Nesterov on filtered state)
-            # ('adam', 0.1),
-            # ('amsgrad', 0.1),
-            # ('nadam', 0.1)
+            ('adam', 0.1),
+            ('amsgrad', 0.1),
+            ('nadam', 0.1),
+            ('adagrad', 0.5),
+            ('rmsprop', 0.1),
         ]
         
         results = compare_step_methods(game, init_state, methods=methods, num_iter=args.num_iter)
