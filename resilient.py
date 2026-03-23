@@ -715,35 +715,82 @@ def animate_position_comparison(game, init_state, num_iter=500, save_path=None, 
     return anim
 
 
-def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None, frame_skip=10):
+def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None, frame_skip=10,
+                                  constant_lr=0.025, accel_lr=0.05, accel_momentum=0.9):
     """
     Animate agent positions converging to NE alongside the time-varying communication graph.
 
-    Left panel: communication graph with edges updating at each topology switch.
-    Right panel: agent positions in 2D action space with trajectory tails.
+    Three-panel layout:
+      Left:   communication graph with edges updating at each topology switch.
+      Center: agent trajectory using constant step size.
+      Right:  agent trajectory using Nesterov (accelerated) method.
+
+    Both simulations see the same graph-switch sequence (game state + rng restored
+    between runs).
 
     Parameters
     ----------
     game : Resilient
-        The game instance (will be run once with its current step method)
+        The game instance
     init_state : np.ndarray
-        Initial state vector
+        Initial state vector (same for both methods)
     num_iter : int
         Number of algorithm iterations
     save_path : str, optional
         Save animation as .gif to this path
     frame_skip : int
         Show every N-th iteration as a frame
+    constant_lr : float
+        Step size for the constant method
+    accel_lr : float
+        Base learning rate for the accelerated (Nesterov) method
+    accel_momentum : float
+        Momentum parameter for the accelerated method
     """
     from matplotlib.collections import LineCollection
+    import copy
 
     original_num_iter = game.sim_config.num_iter
+    original_step_method = game.sim_config.step_method
+    original_step_size = game.sim_config.step_size
+    original_base_lr = game.sim_config.adaptive_base_lr
+    original_momentum = game.sim_config.accelerated_momentum
     game.sim_config.num_iter = num_iter
 
-    print(f"Running simulation ({game.sim_config.step_method}, {num_iter} iters) for animation...")
-    err_rec, pos_rec, graph_history, _ = game.iterate_algo(init_state.copy(), verbose=True)
+    saved_Gc = game.Gc.copy()
+    saved_Go = game.Go.copy()
+    saved_adj_list = copy.deepcopy(game.adj_list_gc)
+    saved_offsets = game.offsets.copy()
+    saved_neighbors = game.neighbors.copy()
+    saved_rng_state = copy.deepcopy(game.rng.bit_generator.state)
 
+    # --- Run 1: constant step ---
+    game.sim_config.step_method = 'constant'
+    game.sim_config.step_size = constant_lr
+    game.step_controller = None
+    print(f"Running constant (lr={constant_lr}, {num_iter} iters) for animation...")
+    err_rec_const, pos_rec_const, graph_history, _ = game.iterate_algo(init_state.copy(), verbose=True)
+
+    # Restore graph state + rng so the accelerated run sees the same topology sequence
+    game.Gc = saved_Gc.copy()
+    game.Go = saved_Go.copy()
+    game.adj_list_gc = copy.deepcopy(saved_adj_list)
+    game.offsets = saved_offsets.copy()
+    game.neighbors = saved_neighbors.copy()
+    game.rng.bit_generator.state = copy.deepcopy(saved_rng_state)
+
+    # --- Run 2: accelerated (Nesterov) ---
+    game.set_step_method('accelerated', accel_lr, momentum=accel_momentum)
+    print(f"Running Nesterov (lr={accel_lr}, momentum={accel_momentum}, {num_iter} iters) for animation...")
+    err_rec_accel, pos_rec_accel, _, _ = game.iterate_algo(init_state.copy(), verbose=True)
+
+    # Restore original game settings
     game.sim_config.num_iter = original_num_iter
+    game.sim_config.step_method = original_step_method
+    game.sim_config.step_size = original_step_size
+    game.sim_config.adaptive_base_lr = original_base_lr
+    game.sim_config.accelerated_momentum = original_momentum
+    game._init_step_controller()
 
     # Subsample frame indices
     indices = list(range(0, num_iter + 1, frame_skip))
@@ -756,7 +803,7 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
     honest = [i for i in range(N) if i not in adversarial]
     tail_length = max(20, 2 * frame_skip)
 
-    # Fixed node positions for the graph panel (grid layout, same as visualize_graph)
+    # Fixed node positions for the graph panel (grid layout)
     graph_pos = {}
     node_idx = 0
     end = game.grid_width - 1
@@ -772,22 +819,24 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
                 graph_pos[node_idx] = (col, end - row)
                 node_idx += 1
 
-    # Precompute axis limits for the position panel
-    all_x, all_y = [], []
-    for pos in pos_rec:
-        p = np.ravel(pos)
-        for i in range(N):
-            all_x.append(p[2 * i])
-            all_y.append(p[2 * i + 1])
-    x_min, x_max = min(all_x), max(all_x)
-    y_min, y_max = min(all_y), max(all_y)
-    margin = 0.1 * max(x_max - x_min, y_max - y_min, 1)
-    x_min -= margin; x_max += margin
-    y_min -= margin; y_max += margin
+    # Per-panel axis limits so a divergent method doesn't crush the other panel
+    def _compute_limits(pos_list):
+        ax_all, ay_all = [], []
+        for pos in pos_list:
+            p = np.ravel(pos)
+            for i in range(N):
+                ax_all.append(p[2 * i])
+                ay_all.append(p[2 * i + 1])
+        xlo, xhi = min(ax_all), max(ax_all)
+        ylo, yhi = min(ay_all), max(ay_all)
+        m = 0.1 * max(xhi - xlo, yhi - ylo, 1)
+        return xlo - m, xhi + m, ylo - m, yhi + m
+
+    limits_const = _compute_limits(pos_rec_const)
+    limits_accel = _compute_limits(pos_rec_accel)
 
     ne_flat = np.ravel(NE)
 
-    # Build a lookup: for a given iteration, which graph_history entry is active?
     def get_graph_for_iter(k):
         active_gc = graph_history[0][1]
         for switch_iter, gc in graph_history:
@@ -797,11 +846,11 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
                 break
         return active_gc
 
-    # --- Figure setup ---
-    fig, (ax_graph, ax_pos) = plt.subplots(1, 2, figsize=(14, 6))
-    fig.subplots_adjust(wspace=0.30)
+    # --- Figure setup: 3 panels ---
+    fig, (ax_graph, ax_const, ax_nesterov) = plt.subplots(1, 3, figsize=(20, 6))
+    fig.subplots_adjust(wspace=0.25)
 
-    # Graph panel -- static node scatter drawn once, edges redrawn each frame
+    # --- Graph panel (left) ---
     graph_pos_arr = np.array([graph_pos[i] for i in range(N)])
     node_colors_graph = ['#ff7f0e' if i in adversarial else '#1f77b4' for i in range(N)]
     ax_graph.scatter(graph_pos_arr[:, 0], graph_pos_arr[:, 1],
@@ -821,24 +870,31 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
     graph_title = ax_graph.text(0.5, 1.06, '', transform=ax_graph.transAxes,
                                 ha='center', fontsize=9)
 
-    # Position panel
-    ax_pos.scatter([float(ne_flat[2 * i]) for i in range(N)],
-                   [float(ne_flat[2 * i + 1]) for i in range(N)],
-                   c='darkgreen', s=40, marker='x', label='NE', zorder=5)
-    scat_honest = ax_pos.scatter([], [], c='#1f77b4', s=25, alpha=0.8, label='Honest', zorder=4)
-    scat_adv = ax_pos.scatter([], [], c='#ff7f0e', s=35, alpha=0.8, marker='s', label='Adversarial', zorder=4)
+    # --- Helper to set up a trajectory axis ---
+    ne_x = [float(ne_flat[2 * i]) for i in range(N)]
+    ne_y = [float(ne_flat[2 * i + 1]) for i in range(N)]
 
-    trail_lines_honest = [ax_pos.plot([], [], color='#1f77b4', alpha=0.25, linewidth=0.6)[0] for _ in honest]
-    trail_lines_adv = [ax_pos.plot([], [], color='#ff7f0e', alpha=0.25, linewidth=0.6, linestyle='--')[0] for _ in adversarial]
+    def setup_trajectory_ax(ax, title, limits):
+        x_lo, x_hi, y_lo, y_hi = limits
+        ax.scatter(ne_x, ne_y, c='darkgreen', s=40, marker='x', label='NE', zorder=5)
+        scat_h = ax.scatter([], [], c='#1f77b4', s=25, alpha=0.8, label='Honest', zorder=4)
+        scat_a = ax.scatter([], [], c='#ff7f0e', s=35, alpha=0.8, marker='s', label='Adversarial', zorder=4)
+        trails_h = [ax.plot([], [], color='#1f77b4', alpha=0.25, linewidth=0.6)[0] for _ in honest]
+        trails_a = [ax.plot([], [], color='#ff7f0e', alpha=0.25, linewidth=0.6, linestyle='--')[0] for _ in adversarial]
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_lo, y_hi)
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.2)
+        ax.set_xlabel('x coordinate')
+        ax.set_ylabel('y coordinate')
+        ax.set_title(title)
+        ax.legend(loc='upper right', fontsize=7)
+        return scat_h, scat_a, trails_h, trails_a
 
-    ax_pos.set_xlim(x_min, x_max)
-    ax_pos.set_ylim(y_min, y_max)
-    ax_pos.set_aspect('equal')
-    ax_pos.grid(True, alpha=0.2)
-    ax_pos.set_xlabel('x coordinate')
-    ax_pos.set_ylabel('y coordinate')
-    ax_pos.set_title('Agent Positions')
-    ax_pos.legend(loc='upper right', fontsize=7)
+    scat_const_h, scat_const_a, trails_const_h, trails_const_a = setup_trajectory_ax(
+        ax_const, f'Constant ({chr(945)}={constant_lr})', limits_const)
+    scat_accel_h, scat_accel_a, trails_accel_h, trails_accel_a = setup_trajectory_ax(
+        ax_nesterov, f'Nesterov ({chr(945)}={accel_lr}, {chr(946)}={accel_momentum})', limits_accel)
 
     title_text = fig.suptitle('', fontsize=11, y=0.98)
 
@@ -850,40 +906,49 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
                     segments.append([graph_pos[i], graph_pos[j]])
         return segments
 
-    def update(frame_idx):
-        k = indices[min(frame_idx, len(indices) - 1)]
-
-        # --- Update graph panel edges ---
-        gc = get_graph_for_iter(k)
-        edge_collection.set_segments(_edges_from_gc(gc))
-        num_edges = int(np.sum(gc) / 2)
-        graph_title.set_text(f'Edges: {num_edges}')
-
-        # --- Update position panel ---
+    def _update_trajectory_panel(k, pos_rec, scat_h, scat_a, trails_h, trails_a):
         p = np.ravel(pos_rec[k])
         hx = [p[2 * i] for i in honest]
         hy = [p[2 * i + 1] for i in honest]
         ax_ = [p[2 * i] for i in adversarial]
         ay = [p[2 * i + 1] for i in adversarial]
-        scat_honest.set_offsets(np.c_[hx, hy] if honest else np.empty((0, 2)))
-        scat_adv.set_offsets(np.c_[ax_, ay] if adversarial else np.empty((0, 2)))
+        scat_h.set_offsets(np.c_[hx, hy] if honest else np.empty((0, 2)))
+        scat_a.set_offsets(np.c_[ax_, ay] if adversarial else np.empty((0, 2)))
 
-        # Trajectory tails
         start = max(0, k - tail_length)
         for idx_h, agent in enumerate(honest):
             xs = [float(np.ravel(pos_rec[t])[2 * agent]) for t in range(start, k + 1)]
             ys = [float(np.ravel(pos_rec[t])[2 * agent + 1]) for t in range(start, k + 1)]
-            trail_lines_honest[idx_h].set_data(xs, ys)
+            trails_h[idx_h].set_data(xs, ys)
         for idx_a, agent in enumerate(adversarial):
             xs = [float(np.ravel(pos_rec[t])[2 * agent]) for t in range(start, k + 1)]
             ys = [float(np.ravel(pos_rec[t])[2 * agent + 1]) for t in range(start, k + 1)]
-            trail_lines_adv[idx_a].set_data(xs, ys)
+            trails_a[idx_a].set_data(xs, ys)
 
-        err = err_rec[k]
-        title_text.set_text(f'Iteration {k}/{num_iter}  |  Error: {err:.3e}')
+    def update(frame_idx):
+        k = indices[min(frame_idx, len(indices) - 1)]
 
-        return (edge_collection, scat_honest, scat_adv, graph_title, title_text,
-                *trail_lines_honest, *trail_lines_adv)
+        # Graph panel
+        gc = get_graph_for_iter(k)
+        edge_collection.set_segments(_edges_from_gc(gc))
+        num_edges = int(np.sum(gc) / 2)
+        graph_title.set_text(f'Edges: {num_edges}')
+
+        # Constant trajectory panel
+        _update_trajectory_panel(k, pos_rec_const, scat_const_h, scat_const_a,
+                                 trails_const_h, trails_const_a)
+        # Nesterov trajectory panel
+        _update_trajectory_panel(k, pos_rec_accel, scat_accel_h, scat_accel_a,
+                                 trails_accel_h, trails_accel_a)
+
+        err_c = err_rec_const[k]
+        err_n = err_rec_accel[k]
+        title_text.set_text(
+            f'Iteration {k}/{num_iter}  |  Constant err: {err_c:.3e}  |  Nesterov err: {err_n:.3e}')
+
+        return (edge_collection, graph_title, title_text,
+                scat_const_h, scat_const_a, scat_accel_h, scat_accel_a,
+                *trails_const_h, *trails_const_a, *trails_accel_h, *trails_accel_a)
 
     n_frames = len(indices)
     anim = FuncAnimation(fig, update, frames=n_frames, interval=100, blit=True)
@@ -1047,12 +1112,9 @@ if __name__ == "__main__":
         
     elif args.mode == 'animate-graph':
         print("\n" + "="*60)
-        print("ANIMATING: Trajectory + Time-Varying Graph")
+        print("ANIMATING: Constant vs Nesterov Trajectory + Time-Varying Graph")
         print("="*60)
         init_state = -7 + 14*np.random.rand(game.dim_state, 1)
-
-        if args.step_method != 'constant':
-            game.set_step_method(args.step_method, args.base_lr, momentum=args.momentum)
 
         animate_trajectory_with_graph(
             game, init_state,
