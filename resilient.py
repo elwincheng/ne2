@@ -92,7 +92,7 @@ def adjlist_to_csr(adj_list_gc, N):
 class Resilient:
     """Simulation for the resilient algorithm"""
     def __init__(self, sim_config, grid_width, random_agents=None, constant_agents=None, l_inf_ball = 1, D = 1, corner_size = 1,
-                 aggregation_method="trim", median_window=None, use_geometric_median=False):
+                 aggregation_method="median", median_window=0, use_geometric_median=True):
         self.sim_config = sim_config        
         self.grid_width = grid_width
         self.corner_size = corner_size
@@ -373,7 +373,16 @@ class Resilient:
 
         y = np.ascontiguousarray(state_y, dtype=np.float64)
         go = np.ascontiguousarray(self.Go, dtype=np.uint8)
-
+        # if use_geom:
+        #     print("Using geometric median")
+        # else:
+        #     print("Using median")
+        # if self.median_window is not None:
+        #     print(f"Using median window: {self.median_window}")
+        # else:
+        #     print("Using no median window")
+        # if self.aggregation_method == "median_window":
+        #     print(f"Using median window: {self.median_window}")
         return remove_d.filter_communicated_message(
             y,
             go,
