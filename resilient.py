@@ -91,10 +91,20 @@ def adjlist_to_csr(adj_list_gc, N):
 
 class Resilient:
     """Simulation for the resilient algorithm"""
-    def __init__(self, sim_config, grid_width, random_agents=None, constant_agents=None, l_inf_ball = 1, D = 1, corner_size = 1):
+    def __init__(self, sim_config, grid_width, random_agents=None, constant_agents=None, l_inf_ball = 1, D = 1, corner_size = 1,
+                 aggregation_method="trim", median_window=None, use_geometric_median=False):
         self.sim_config = sim_config        
         self.grid_width = grid_width
         self.corner_size = corner_size
+
+        if aggregation_method not in ("trim", "median", "median_window"):
+            raise ValueError(
+                f"Unknown aggregation_method '{aggregation_method}'. "
+                "Use 'trim', 'median', or 'median_window'."
+            )
+        self.aggregation_method = aggregation_method
+        self.median_window = median_window
+        self.use_geometric_median = use_geometric_median
 
         self.dim_action_i = 2
         self.N = grid_width**2 - 4*corner_size**2
@@ -338,22 +348,34 @@ class Resilient:
         return average
 
     def filter_communicated_message(self, state_y):
-        state_v = np.zeros([self.dim_state,1])
+        if self.aggregation_method == "trim":
+            agg = 0
+        elif self.aggregation_method == "median":
+            agg = 1
+        else:
+            agg = 2
 
-        for agent_i in range(self.N):
-            for state_j in range(self.N):
-                for component_k in range(self.dim_action_i):
-                    offset = self.dim_action_i*state_j+component_k
-                    state_index_i = self.dim_action*agent_i + offset
-                    if self.Go[agent_i, state_j] == 1:
-                        state_index_j = self.dim_action*state_j + offset
-                        state_v[state_index_i] = state_y[state_index_j,state_j]
-                    else:
-                        agent_i_in_messages = [ state_y[self.dim_action*X + offset, agent_i] for X in self.adj_list_gc[agent_i]]
-                        #state_v[state_index_i] = remove_d.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i], self.D)
-                        state_v[state_index_i] = self.remove_extreme_D_average(agent_i_in_messages, state_y[state_index_i,agent_i])
+        use_geom = self.aggregation_method == "median" and self.use_geometric_median
+        mad = self.median_window == "mad"
+        if self.median_window is None or self.median_window == "mad":
+            mw = float("nan")
+        else:
+            mw = float(self.median_window)
 
-        return state_v
+        y = np.ascontiguousarray(state_y, dtype=np.float64)
+        go = np.ascontiguousarray(self.Go, dtype=np.uint8)
+
+        return remove_d.filter_communicated_message(
+            y,
+            go,
+            self.offsets,
+            self.neighbors,
+            self.D,
+            agg,
+            use_geom,
+            mw,
+            mad,
+        )
 
     def adversarial_communication(self, state_x):
         dim = self.dim_action
@@ -412,7 +434,7 @@ class Resilient:
                 print(f"Iteration {i} of {self.sim_config.num_iter}, error: {records[-1]:.6f}")
             
             state_y = self.adversarial_communication(state_x)
-            state_v = remove_d.filter_communicated_message(state_y, self.Go, self.offsets, self.neighbors, self.D)
+            state_v = self.filter_communicated_message(state_y)
 
             # Change the graph topology and visualize in the form of a pdf
             if self.graph_switch_period and i > 0 and (i % self.graph_switch_period == 0):

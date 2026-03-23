@@ -7,6 +7,7 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 if platform.system() == "Darwin":
     # macOS: clang doesn't support -fopenmp directly without libomp
     # Build without OpenMP for simplicity (still fast due to C++)
+    print("Building for macOS")
     extra_compile = ["-O3", "-std=c++17"]
     extra_link = []
 elif platform.system() == "Windows":
