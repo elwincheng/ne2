@@ -214,8 +214,9 @@ class Resilient:
                 )
                 
                 if not is_corner:
-                    # Map grid coordinates to plot coordinates
-                    pos[node_idx] = (col, end - row)
+                    # Map grid to plot coords: y = row (not end - row) so vertical matches
+                    # the second action component / trajectory y vs matplotlib y-up.
+                    pos[node_idx] = (col, row)
                     node_idx += 1
 
         # 3. Create the figure
@@ -816,7 +817,8 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
                 (row > end - game.corner_size and col > end - game.corner_size)
             )
             if not is_corner:
-                graph_pos[node_idx] = (col, end - row)
+                # Match visualize_graph: (col, row) for alignment with trajectory axes
+                graph_pos[node_idx] = (col, row)
                 node_idx += 1
 
     # Per-panel axis limits so a divergent method doesn't crush the other panel
