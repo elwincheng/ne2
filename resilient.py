@@ -642,12 +642,12 @@ def animate_position_comparison(game, init_state, num_iter=500, save_path=None, 
     ne_x = [float(ne_flat[2*i]) for i in range(N)]
     ne_y = [float(ne_flat[2*i+1]) for i in range(N)]
     
-    scat_left_honest = ax_left.scatter([], [], c='blue', s=20, alpha=0.7, label='Honest')
-    scat_left_adv = ax_left.scatter([], [], c='red', s=30, alpha=0.8, marker='s', label='Adversarial')
-    scat_right_honest = ax_right.scatter([], [], c='orange', s=20, alpha=0.7, label='Honest')
-    scat_right_adv = ax_right.scatter([], [], c='red', s=30, alpha=0.8, marker='s', label='Adversarial')
-    ax_left.scatter(ne_x, ne_y, c='darkgreen', s=30, marker='x', label='NE')
-    ax_right.scatter(ne_x, ne_y, c='darkgreen', s=30, marker='x', label='NE')
+    scat_left_honest = ax_left.scatter([], [], c='blue', s=20, alpha=0.7, label='Honest', zorder=6)
+    scat_left_adv = ax_left.scatter([], [], c='red', s=30, alpha=0.8, marker='s', label='Adversarial', zorder=6)
+    scat_right_honest = ax_right.scatter([], [], c='orange', s=20, alpha=0.7, label='Honest', zorder=6)
+    scat_right_adv = ax_right.scatter([], [], c='red', s=30, alpha=0.8, marker='s', label='Adversarial', zorder=6)
+    ax_left.scatter(ne_x, ne_y, c='darkgreen', s=30, marker='x', label='NE', zorder=2)
+    ax_right.scatter(ne_x, ne_y, c='darkgreen', s=30, marker='x', label='NE', zorder=2)
     
     for ax in (ax_left, ax_right):
         ax.set_xlim(x_min, x_max)
@@ -878,11 +878,12 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
 
     def setup_trajectory_ax(ax, title, limits):
         x_lo, x_hi, y_lo, y_hi = limits
-        ax.scatter(ne_x, ne_y, c='darkgreen', s=40, marker='x', label='NE', zorder=5)
-        scat_h = ax.scatter([], [], c='#1f77b4', s=25, alpha=0.8, label='Honest', zorder=4)
-        scat_a = ax.scatter([], [], c='#ff7f0e', s=35, alpha=0.8, marker='s', label='Adversarial', zorder=4)
-        trails_h = [ax.plot([], [], color='#1f77b4', alpha=0.25, linewidth=0.6)[0] for _ in honest]
-        trails_a = [ax.plot([], [], color='#ff7f0e', alpha=0.25, linewidth=0.6, linestyle='--')[0] for _ in adversarial]
+        # NE behind trails and agents so agent dots stay visible at convergence
+        ax.scatter(ne_x, ne_y, c='darkgreen', s=40, marker='x', label='NE', zorder=2)
+        scat_h = ax.scatter([], [], c='#1f77b4', s=25, alpha=0.8, label='Honest', zorder=6)
+        scat_a = ax.scatter([], [], c='#ff7f0e', s=35, alpha=0.8, marker='s', label='Adversarial', zorder=6)
+        trails_h = [ax.plot([], [], color='#1f77b4', alpha=0.25, linewidth=0.6, zorder=3)[0] for _ in honest]
+        trails_a = [ax.plot([], [], color='#ff7f0e', alpha=0.25, linewidth=0.6, linestyle='--', zorder=3)[0] for _ in adversarial]
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_lo, y_hi)
         ax.set_aspect('equal')
