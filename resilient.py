@@ -716,7 +716,7 @@ def animate_position_comparison(game, init_state, num_iter=500, save_path=None, 
 
 
 def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None, frame_skip=10,
-                                  constant_lr=0.025, accel_lr=0.05, accel_momentum=0.9):
+                                  constant_lr=0.025, accel_lr=0.025, accel_momentum=0.9):
     """
     Animate agent positions converging to NE alongside the time-varying communication graph.
 
@@ -1053,13 +1053,13 @@ if __name__ == "__main__":
         game = Resilient(sim_config, grid_width=15, 
                         random_agents=set[int]([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), 
                         constant_agents=None, l_inf_ball=2, D=3, corner_size=1)
-    elif args.grid_width == 10:
-        game = Resilient(sim_config, grid_width=10,
+    elif args.grid_width == 8:
+        game = Resilient(sim_config, grid_width=8,
                         random_agents=set([4, 6, 11, 19, 26, 32, 38, 41]),
-                        constant_agents=None, l_inf_ball=2, D=2, corner_size=1)
-    elif args.grid_width == 6:
-        game = Resilient(sim_config, grid_width=6,
-                        random_agents=set([4, 6, 11, 16, 24, 25, 28, 30]),
+                        constant_agents=None, l_inf_ball=1, D=1, corner_size=1)
+    elif args.grid_width == 7:
+        game = Resilient(sim_config, grid_width=7,
+                        random_agents=set([4, 6, 11, 19, 26, 31]),
                         constant_agents=None, l_inf_ball=1, D=1, corner_size=1)
     else:
         game = Resilient(sim_config, grid_width=args.grid_width, 
