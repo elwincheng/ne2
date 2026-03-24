@@ -105,14 +105,14 @@ static double median_window_aggregate_vec(std::vector<double> vals,
     return sum / static_cast<double>(cnt);
 }
 
-/** Weiszfeld algorithm for geometric median in R^2. */
+/**
+ * Weiszfeld in R^2 — matches resilient.py module-level geometric_median (maxiter=50, tol=1e-6,
+ * eps=1e-12): mean init, if min distance to iterate < eps return closest data point (np.argmin),
+ * stop when ||y_next - y|| <= tol.
+ */
 static std::array<double, 2> geometric_median_2d(std::vector<std::array<double, 2>> pts) {
     const size_t n = pts.size();
     if (n == 0) return {0.0, 0.0};
-    if (n == 1) return pts[0];
-    if (n == 2) {
-        return {0.5 * (pts[0][0] + pts[1][0]), 0.5 * (pts[0][1] + pts[1][1])};
-    }
 
     double cx = 0.0, cy = 0.0;
     for (const auto& p : pts) {
@@ -122,25 +122,37 @@ static std::array<double, 2> geometric_median_2d(std::vector<std::array<double, 
     cx /= static_cast<double>(n);
     cy /= static_cast<double>(n);
 
-    constexpr int kMaxIter = 10000;
-    constexpr double kTol = 1e-12;
-    constexpr double kEps = 1e-15;
+    constexpr int kMaxIter = 50;
+    constexpr double kTol = 1e-6;
+    constexpr double kEps = 1e-12;
 
     for (int iter = 0; iter < kMaxIter; ++iter) {
+        double min_d = std::numeric_limits<double>::infinity();
+        size_t argmin_i = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const double d = std::hypot(pts[i][0] - cx, pts[i][1] - cy);
+            if (d < min_d) {
+                min_d = d;
+                argmin_i = i;
+            }
+        }
+        if (min_d < kEps) {
+            return pts[argmin_i];
+        }
+
         double num_x = 0.0, num_y = 0.0, den = 0.0;
         for (size_t i = 0; i < n; ++i) {
             const double dx = pts[i][0] - cx;
             const double dy = pts[i][1] - cy;
             const double d = std::hypot(dx, dy);
-            if (d < kEps) return pts[i];
-            const double inv = 1.0 / d;
+            const double inv = 1.0 / std::max(d, kEps);
             num_x += pts[i][0] * inv;
             num_y += pts[i][1] * inv;
             den += inv;
         }
         const double nx = num_x / den;
         const double ny = num_y / den;
-        if (std::hypot(nx - cx, ny - cy) < kTol * (std::hypot(cx, cy) + 1.0)) {
+        if (std::hypot(nx - cx, ny - cy) <= kTol) {
             return {nx, ny};
         }
         cx = nx;
