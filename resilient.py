@@ -22,6 +22,32 @@ import networkx as nx
 import info_robust_graph as irg
 from adaptive_step import AdaptiveStepController, AdaptiveStepConfig, create_controller
 
+def geometric_median(points: np.ndarray, maxiter: int = 50, tol: float = 1e-6, eps: float = 1e-12):
+    """
+    Weiszfeld algorithm for geometric median.
+    points: (m, d) array
+    Returns: (d,) array
+    """
+    if points.ndim != 2 or points.shape[0] == 0:
+        raise ValueError("points must be shape (m, d) with m > 0")
+
+    y = points.mean(axis=0)  # initialize at mean
+    for i in range(maxiter):
+        diffs = points - y
+        dists = np.linalg.norm(diffs, axis=1)
+        # If y coincides with a point, that's a median (avoid divide by 0)
+        if np.any(dists < eps):
+            return points[np.argmin(dists)].copy()
+
+        w = 1.0 / np.maximum(dists, eps)
+        y_next = (points * w[:, None]).sum(axis=0) / w.sum()
+
+        if np.linalg.norm(y_next - y) <= tol:
+            return y_next
+        y = y_next
+
+    return y
+
 @dataclass
 class simulation_config:
     '''A container just to hold simulation parameters'''
@@ -357,6 +383,158 @@ class Resilient:
         return average
 
     def filter_communicated_message(self, state_y):
+        state_v = np.zeros([self.dim_state,1])
+
+        for agent_i in range(self.N):
+            for state_j in range(self.N):
+                if self.aggregation_method == "median" and self.use_geometric_median:
+                    # indices for x,y components
+                    offset_x = self.dim_action_i * state_j + 0
+                    offset_y = self.dim_action_i * state_j + 1
+                    idx_i_x = self.dim_action * agent_i + offset_x
+                    idx_i_y = self.dim_action * agent_i + offset_y
+
+                    if self.Go[agent_i, state_j] == 1:
+                        idx_j_x = self.dim_action * state_j + offset_x
+                        idx_j_y = self.dim_action * state_j + offset_y
+                        state_v[idx_i_x] = state_y[idx_j_x, state_j]
+                        state_v[idx_i_y] = state_y[idx_j_y, state_j]
+                    else:
+                        # gather neighbor 2D points (neighbors' claims about agent_i)
+                        pts = []
+                        for X in self.adj_list_gc[agent_i]:
+                            px = float(state_y[self.dim_action * X + offset_x, agent_i])
+                            py = float(state_y[self.dim_action * X + offset_y, agent_i])
+                            pts.append([px, py])
+
+                        # include own value
+                        ownx = float(state_y[idx_i_x, agent_i])
+                        owny = float(state_y[idx_i_y, agent_i])
+                        pts.append([ownx, owny])
+
+                        pts = np.array(pts, dtype=float)
+                        agg2 = self.robust_geom_median_2d(pts, D=self.D)
+                        state_v[idx_i_x] = float(agg2[0])
+                        state_v[idx_i_y] = float(agg2[1])
+
+                    continue  # skip scalar loop since we handled both components
+
+                for component_k in range(self.dim_action_i):
+                    offset = self.dim_action_i*state_j+component_k
+                    state_index_i = self.dim_action*agent_i + offset
+                    if self.Go[agent_i, state_j] == 1:
+                        state_index_j = self.dim_action*state_j + offset
+                        state_v[state_index_i] = state_y[state_index_j,state_j]
+                    else:
+                        agent_i_in_messages = [
+                            state_y[self.dim_action*X + offset, agent_i]
+                            for X in self.adj_list_gc[agent_i]
+                        ]
+                        own_value = state_y[state_index_i, agent_i]
+
+                        # Choose aggregation method
+                        if self.aggregation_method == "median":
+                            state_v[state_index_i] = self.median_aggregate(
+                                agent_i_in_messages,
+                                own_value
+                            )
+                        elif self.aggregation_method == "median_window":
+                            state_v[state_index_i] = self.median_window_aggregate(
+                                agent_i_in_messages,
+                                own_value
+                            )
+                        else:  # "trim"
+                            state_v[state_index_i] = self.remove_extreme_D_average(
+                                agent_i_in_messages,
+                                own_value
+                            )
+
+        return state_v
+
+    def robust_geom_median_2d(self, points_2d: np.ndarray, D: int):
+        """
+        2D robust aggregation using geometric median as the center.
+        Optional improvements:
+        - adaptive MAD-like radius in 2D (median of distances to center)
+        - k-closest guarantee (based on distance to center)
+        Returns (agg_point(2,), frac_kept, window_used, k_used).
+        """
+        pts = points_2d.astype(float)
+        total = pts.shape[0]
+
+        center = geometric_median(pts)
+        dists = np.linalg.norm(pts - center[None, :], axis=1)
+
+        # ---- window selection in 2D ----
+        window_used = None
+        if self.median_window == "mad":
+            mad2 = float(np.median(np.abs(dists - np.median(dists))))
+            # Use the same multiplier but applied to a robust distance scale
+            w = 1.4826 * mad2 + 1e-12
+            window_used = w
+            mask = dists <= (np.median(dists) + w)
+            kept = pts[mask]
+            kept_dists = dists[mask]
+        else:
+            w = float(self.median_window)
+            window_used = w
+            mask = dists <= w
+            kept = pts[mask]
+            kept_dists = dists[mask]
+
+        if kept.shape[0] == 0:
+            # fall back to geometric median of all points
+            return center #, 0.0, window_used, 0
+
+        # ---- K-closest guarantee ----
+        # if self.use_kclosest:
+        #     if self.k_rule == "total_minus_2D":
+        #         K = max(1, total - 2 * D)
+        #     elif self.k_rule == "fixed":
+        #         K = max(1, min(self.k_fixed, total))
+        #     else:
+        #         raise ValueError(f"Unknown k_rule: {self.k_rule}")
+
+        #     order = np.argsort(kept_dists)
+        #     K_eff = min(K, kept.shape[0])
+        #     kept = kept[order[:K_eff]]
+        #     k_used = int(K_eff)
+        # else:
+        #     k_used = int(kept.shape[0])
+
+        # frac = float(kept.shape[0]) / float(total)
+
+        # Return mean of kept points (stable) OR geometric median of kept points (more robust but slower).
+        # Here: mean is fine because outliers were filtered by geom-median centering.
+        return kept.mean(axis=0)# , frac, window_used, k_used
+
+    def geometric_median(points: np.ndarray, maxiter: int = 50, tol: float = 1e-6, eps: float = 1e-12):
+        """
+        Weiszfeld algorithm for geometric median.
+        points: (m, d) array
+        Returns: (d,) array
+        """
+        if points.ndim != 2 or points.shape[0] == 0:
+            raise ValueError("points must be shape (m, d) with m > 0")
+
+        y = points.mean(axis=0)  # initialize at mean
+        for i in range(maxiter):
+            diffs = points - y
+            dists = np.linalg.norm(diffs, axis=1)
+            # If y coincides with a point, that's a median (avoid divide by 0)
+            if np.any(dists < eps):
+                return points[np.argmin(dists)].copy()
+
+            w = 1.0 / np.maximum(dists, eps)
+            y_next = (points * w[:, None]).sum(axis=0) / w.sum()
+
+            if np.linalg.norm(y_next - y) <= tol:
+                return y_next
+            y = y_next
+
+        return y
+
+    def filter_communicated_message2(self, state_y):
         if self.aggregation_method == "trim":
             agg = 0
         elif self.aggregation_method == "median":
@@ -1127,6 +1305,10 @@ if __name__ == "__main__":
     adversarial = random_agents + constant_agents
 
     # Create game instance
+    if args.grid_width == 4:
+        game = Resilient(sim_config, grid_width=4, 
+                        random_agents=None, 
+                        constant_agents=set[int]([0, 3, 6, 9, 11]), l_inf_ball=2, D=1, corner_size=1)
     if args.grid_width == 15:
         game = Resilient(sim_config, grid_width=15, 
                         random_agents=set[int]([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), 
