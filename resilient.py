@@ -382,7 +382,7 @@ class Resilient:
         average = average/(high_index - low_index + 2)
         return average
 
-    def filter_communicated_message(self, state_y):
+    def filter_communicated_message2(self, state_y):
         state_v = np.zeros([self.dim_state,1])
 
         for agent_i in range(self.N):
@@ -534,7 +534,7 @@ class Resilient:
 
         return y
 
-    def filter_communicated_message2(self, state_y):
+    def filter_communicated_message(self, state_y):
         if self.aggregation_method == "trim":
             agg = 0
         elif self.aggregation_method == "median":
@@ -1317,10 +1317,10 @@ if __name__ == "__main__":
         game = Resilient(sim_config, grid_width=8,
                         random_agents=set([4, 6, 11, 19, 26, 32, 38, 41]),
                         constant_agents=None, l_inf_ball=1, D=1, corner_size=1)
-    elif args.grid_width == 7:
-        game = Resilient(sim_config, grid_width=7,
-                        random_agents=set([4, 6, 11, 19, 26, 31]),
-                        constant_agents=None, l_inf_ball=1, D=1, corner_size=1)
+    elif args.grid_width == 6:
+        game = Resilient(sim_config, grid_width=6,
+                        random_agents=set([4, 5, 6, 8, 10, 11, 13, 15, 19, 21, 23, 26, 31]),
+                        constant_agents=None, l_inf_ball=2, D=1, corner_size=1)
     else:
         game = Resilient(sim_config, grid_width=args.grid_width, 
                         random_agents=None, constant_agents=None, 
@@ -1338,11 +1338,11 @@ if __name__ == "__main__":
         methods = [
             ('constant', 0.025),   # Original fixed step size
             ('accelerated', 0.025), # Accelerated GRANE (Nesterov on filtered state)
-            ('adam', 0.1),
-            ('amsgrad', 0.1),
-            ('nadam', 0.1),
-            ('adagrad', 0.5),
-            ('rmsprop', 0.1),
+            # ('adam', 0.1),
+            # ('amsgrad', 0.1),
+            # ('nadam', 0.1),
+            # ('adagrad', 0.5),
+            # ('rmsprop', 0.1),
         ]
         
         results = compare_step_methods(game, init_state, methods=methods, num_iter=args.num_iter)
