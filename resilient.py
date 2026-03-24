@@ -15,6 +15,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.patches import Circle, Rectangle
 from scipy.linalg import block_diag
 import cProfile
 
@@ -38,6 +39,9 @@ class simulation_config:
     num_iter: int = 1000
     graph_switch_period: int = 100
     seed: int = 420
+    # Projection settings: 'none', 'box', 'ball'
+    projection: Literal['none', 'box', 'ball'] = 'none'
+    projection_params: dict = field(default_factory=dict)
 
 def action_select_matrix(dim_action_list: List[int]) -> np.ndarray:
     '''Given the dim of each agent's action return the action select matrix, i.e., the R matrix'''
@@ -368,6 +372,64 @@ class Resilient:
 
         return state_y
 
+    def project_state(self, state_x: np.ndarray) -> np.ndarray:
+        method = getattr(self.sim_config, 'projection', 'none')
+        params = getattr(self.sim_config, 'projection_params', {}) or {}
+        
+        # Configuration: 32 agents, each with 64 dimensions
+        num_agents = (self.grid_width ** 2 - 4)
+        dim_per_agent = num_agents * 2
+
+        if method == 'none':
+            return state_x
+
+        if method == 'box':
+            low = params.get('low', None)
+            high = params.get('high', None)
+            if low is None or high is None:
+                return state_x
+            
+            # Reshape to (32, 64) so boundaries match the second dimension
+            reshaped_x = state_x.reshape(num_agents, dim_per_agent)
+            
+            # Clip will now broadcast correctly across the 32 agents
+            clipped_x = np.clip(reshaped_x, low.flatten(), high.flatten())
+            
+            # Return to original shape (2048, 1)
+            return clipped_x.reshape(state_x.shape)
+
+        if method == 'ball':
+            radius = float(params.get('radius', 1.0))
+            center = params.get('center', None)
+            if center is None:
+                center = np.zeros(2) # (x, y) center
+            else:
+                center = np.asarray(center).flatten()[:2]
+
+            # 1. Reshape to (32 agents, 32 beliefs, 2 coordinates)
+            # This isolates every single (x, y) pair in the entire simulation
+            reshaped_x = state_x.reshape(num_agents, 32, 2)
+            
+            # 2. Calculate the relative vector from center for every (x, y) pair
+            diff = reshaped_x - center # Broadcasting (32, 32, 2) - (2,)
+            
+            # 3. Calculate norm for every single belief point (axis=2)
+            # Result shape: (32, 32, 1)
+            norms = np.linalg.norm(diff, axis=2, keepdims=True)
+            
+            # 4. Calculate scaling factor for every single belief point
+            # If any specific (x, y) pair is outside the radius, scale it back
+            scale = np.where(norms > radius, radius / np.maximum(norms, 1e-9), 1.0)
+            
+            # 5. Apply the projection to the differences
+            projected_reshaped = center + (diff * scale)
+            
+            # 6. Return to the original flat (2048, 1)
+            return projected_reshaped.reshape(state_x.shape)
+
+        return state_x
+
+
     def iterate_algo(self, init_state, verbose: bool = True):
         """
         Run the resilient Nash equilibrium seeking algorithm.
@@ -427,6 +489,8 @@ class Resilient:
                 temp2 = self.R.transpose().dot(temp1)
                 gradients = temp2 + self.RB
                 state_x = y - alpha * gradients
+                # Project onto feasible set if configured
+                state_x = self.project_state(state_x)
                 state_v_prev = state_v
             else:
                 # Compute gradient at current filtered state
@@ -436,9 +500,13 @@ class Resilient:
                 # Apply step size (constant or adaptive)
                 if self.step_controller is None:
                     state_x = state_v - self.sim_config.step_size * gradients
+                    # Project onto feasible set if configured
+                    state_x = self.project_state(state_x)
                 else:
                     update = self.step_controller.get_update(gradients)
                     state_x = state_v - update
+                    # Project onto feasible set if configured
+                    state_x = self.project_state(state_x)
 
             records.append(np.linalg.norm(self.NE-self.R.dot(state_x),2))
             pos_records.append(self.R.dot(state_x))
@@ -466,6 +534,62 @@ class Resilient:
         # plt.rc('xtick', labelsize = 8)    # fontsize of the tick labels
         # plt.rc('ytick', labelsize = 8)    # fontsize of the tick labels
       
+        # Draw projection constraint (if configured) on the same axes
+        try:
+            method = getattr(self.sim_config, 'projection', 'none')
+            params = getattr(self.sim_config, 'projection_params', {}) or {}
+            ax = plt.gca()
+
+            # helper to extract a 2D (x,y) pair from possibly full-state or simple 2-vector
+            def _extract_xy(param):
+                if param is None:
+                    return None
+                arr = np.asarray(param).flatten()
+                if arr.size == 0:
+                    return None
+                # If param matches full state length, take first agent's action components
+                try:
+                    if arr.size == self.dim_state:
+                        return (float(arr[0]), float(arr[1]))
+                except Exception:
+                    pass
+                # If vector has at least 2 entries, take the first two
+                if arr.size >= 2:
+                    return (float(arr[0]), float(arr[1]))
+                # If single value, return it as x with y=0
+                return (float(arr[0]), 0.0)
+
+            if method == 'ball':
+                center = params.get('center', None)
+                radius = params.get('radius', None)
+                if radius is not None:
+                    center_xy = _extract_xy(center) or (0.0, 0.0)
+                    r = float(np.asarray(radius).flatten().item()) if np.asarray(radius).size > 0 else float(radius)
+                    circ = Circle(center_xy, r, fill=False, edgecolor='gray', linestyle='--', linewidth=1.5, alpha=0.8)
+                    ax.add_patch(circ)
+
+            elif method == 'box':
+                low = params.get('low', None)
+                high = params.get('high', None)
+                if low is not None and high is not None:
+                    low_xy = _extract_xy(low)
+                    high_xy = _extract_xy(high)
+                    if low_xy is not None and high_xy is not None:
+                        lx, ly = low_xy
+                        hx, hy = high_xy
+                        x0 = float(min(lx, hx))
+                        y0 = float(min(ly, hy))
+                        width = float(abs(hx - lx))
+                        height = float(abs(hy - ly))
+                        rect = Rectangle((x0, y0), width, height, fill=False, edgecolor='gray', linestyle='--', linewidth=1.5, alpha=0.8)
+                        ax.add_patch(rect)
+
+            # ensure equal aspect so circle looks like a circle
+            ax.set_aspect('equal', adjustable='box')
+        except Exception:
+            # Don't crash plotting if drawing the constraint fails
+            pass
+
         plt.show()
         if save:
             save_plot(figure, "{0}".format(self.example))
@@ -775,6 +899,10 @@ if __name__ == "__main__":
                         help='Save animation to PATH (e.g. animation.gif). Use MPLBACKEND=Agg for headless.')
     parser.add_argument('--frame-skip', type=int, default=10, help='Animation: plot every Nth iteration (default 10)')
     parser.add_argument('--seed', type=int, default=420, help='Random seed for reproducible experiments')
+    parser.add_argument('--projection', choices=['none','box','ball','custom'], default='none',
+                        help='Projection to apply after each gradient update')
+    parser.add_argument('--projection-params', type=str, default='{}',
+                        help='JSON string with projection params (e.g. "{\"low\":-5,\"high\":5}")')
     args = parser.parse_args()
 
     pyrandom.seed(args.seed)
@@ -790,7 +918,13 @@ if __name__ == "__main__":
         if os.path.exists("last_state.txt"):
             os.remove("last_state.txt")
 
-    sim_config = simulation_config(num_iter=args.num_iter, seed=args.seed)
+
+    print('Warning: failed to parse --projection-params JSON, using {}')
+    projection_params = {}
+
+    sim_config = simulation_config(num_iter=args.num_iter, seed=args.seed,
+                                   projection=args.projection,
+                                   projection_params=projection_params)
     
     selected = [0,1,2,3,4,5,6,7,8,9,10,11]
     random_agents = []
@@ -814,6 +948,41 @@ if __name__ == "__main__":
         game = Resilient(sim_config, grid_width=args.grid_width, 
                         random_agents=None, constant_agents=None, 
                         l_inf_ball=1, D=1, corner_size=1)
+
+    # If projection requested but no params provided, create reasonable defaults
+    try:
+        proj = sim_config.projection
+        params = sim_config.projection_params or {}
+        if proj == 'box':
+            if 'low' not in params or 'high' not in params:
+                # derive box from NE agent positions (x,y) with margin
+                ne_flat = np.ravel(game.NE)
+                xs = [float(ne_flat[2*i]) for i in range(game.N)]
+                ys = [float(ne_flat[2*i+1]) for i in range(game.N)]
+                minx, maxx = min(xs), max(xs)
+                miny, maxy = min(ys), max(ys)
+                margin = 0.1 * max(maxx - minx, maxy - miny, 1.0)
+                low = [minx - margin, miny - margin]
+                high = [maxx + margin, maxy + margin]
+                # expand to full state dimension (repeat per agent)
+                low_full = np.array(low * game.N).reshape(-1, 1)
+                high_full = np.array(high * game.N).reshape(-1, 1)
+                sim_config.projection_params.update({'low': low_full, 'high': high_full})
+        elif proj == 'ball':
+            if 'radius' not in params:
+                ne_flat = np.ravel(game.NE)
+                xs = np.array([float(ne_flat[2*i]) for i in range(game.N)])
+                ys = np.array([float(ne_flat[2*i+1]) for i in range(game.N)])
+                cx = float(xs.mean())
+                cy = float(ys.mean())
+                dists = np.sqrt((xs - cx)**2 + (ys - cy)**2)
+                radius = float(dists.max() + 0.1 * max(xs.max()-xs.min(), ys.max()-ys.min(), 1.0))
+                # center expanded to full state dim
+                center_full = np.array([cx, cy] * game.N).reshape(-1, 1)
+                sim_config.projection_params.update({'center': center_full, 'radius': radius})
+    except Exception:
+        # don't crash if something goes wrong building defaults
+        pass
 
     if args.mode == 'compare':
         # Run comparison of all methods
