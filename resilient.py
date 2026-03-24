@@ -143,7 +143,7 @@ class Resilient:
         def generate_ring_adj_matrix(num_nodes, num_jumps):
             """
             Generates a random circulant graph.
-            - num_jumps: number of unique 'distances' each node connects to.
+            - D controls resilience; higher D -> more skip connections.
             """
             adj = np.zeros((num_nodes, num_nodes), dtype=int)
             
@@ -169,10 +169,14 @@ class Resilient:
 
         for attempt in range(max_tries):
             # Decide randomly: 0 for Grid, 1 for Ring
-            graph_type = self.rng.choice(['grid', 'ring', 'ring'])
+            # graph_type = self.rng.choice(['grid', 'ring', 'ring', 'ring'])
+            # graph_type = self.rng.choice(['grid'])
+            graph_type = self.rng.choice(['grid', 'ring'])
+            # graph_type = self.rng.choice(['ring'])
             
             if graph_type == 'grid':
-                r = self.rng.choice([1, 2])
+                # r = self.rng.choice([1, 2])
+                r = self.rng.choice([1])
                 G_full = irg.grid_l_inf_to_adj_matrix(self.grid_width, r)
                 Gc = irg.remove_nodes_from_adj_matrix(G_full, self.corners)
             
@@ -180,7 +184,7 @@ class Resilient:
                 # Start with a radius that has a chance of meeting kappa
                 # A ring with radius 'r' is 2r-connected
                 min_radius = int(np.ceil(desired_kappa / 2))
-                r = self.rng.integers(min_radius, min_radius + 2)
+                r = self.rng.integers(min_radius, min_radius + 5)
                 Gc = generate_ring_adj_matrix(self.N, r)
 
             # Ensure undirected and no self-loops for the robustness check
@@ -473,15 +477,15 @@ class Resilient:
         for i in range(self.sim_config.num_iter):
             if verbose and (i%100) == 0:
                 print(f"Iteration {i} of {self.sim_config.num_iter}, error: {records[-1]:.6f}")
-            
-            state_y = self.adversarial_communication(state_x)
-            state_v = remove_d.filter_communicated_message(state_y, self.Go, self.offsets, self.neighbors, self.D)
 
             # Change the graph topology and visualize in the form of a pdf
             if self.graph_switch_period and i > 0 and (i % self.graph_switch_period == 0):
                 self.update_graph(i, desired_kappa=2 * self.D + 1)
                 self.visualize_graph(i)
                 graph_history.append((i, self.Gc.copy()))
+
+            state_y = self.adversarial_communication(state_x)
+            state_v = remove_d.filter_communicated_message(state_y, self.Go, self.offsets, self.neighbors, self.D)
 
             if self.sim_config.step_method == 'accelerated':
                 # Accelerated GRANE: extrapolate filtered state, gradient at extrapolated point, then update
@@ -964,6 +968,48 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
 
     ne_flat = np.ravel(NE)
 
+    # Projection overlay (if configured): draw once on both trajectory panels
+    method = getattr(game.sim_config, 'projection', 'none')
+    params = getattr(game.sim_config, 'projection_params', {}) or {}
+
+    def _extract_xy(param):
+        if param is None:
+            return None
+        arr = np.asarray(param).flatten()
+        if arr.size == 0:
+            return None
+        try:
+            if arr.size == game.dim_state:
+                return (float(arr[0]), float(arr[1]))
+        except Exception:
+            pass
+        if arr.size >= 2:
+            return (float(arr[0]), float(arr[1]))
+        return (float(arr[0]), 0.0)
+
+    projection_patch_specs = []
+    if method == 'ball':
+        center = params.get('center', None)
+        radius = params.get('radius', None)
+        if radius is not None:
+            center_xy = _extract_xy(center) or (0.0, 0.0)
+            r = float(np.asarray(radius).flatten().item()) if np.asarray(radius).size > 0 else float(radius)
+            projection_patch_specs.append(('ball', center_xy, r))
+    elif method == 'box':
+        low = params.get('low', None)
+        high = params.get('high', None)
+        if low is not None and high is not None:
+            low_xy = _extract_xy(low)
+            high_xy = _extract_xy(high)
+            if low_xy is not None and high_xy is not None:
+                lx, ly = low_xy
+                hx, hy = high_xy
+                x0 = float(min(lx, hx))
+                y0 = float(min(ly, hy))
+                width = float(abs(hx - lx))
+                height = float(abs(hy - ly))
+                projection_patch_specs.append(('box', (x0, y0), width, height))
+
     def get_graph_for_iter(k):
         active_gc = graph_history[0][1]
         for switch_iter, gc in graph_history:
@@ -1023,6 +1069,15 @@ def animate_trajectory_with_graph(game, init_state, num_iter=500, save_path=None
         ax_const, f'Constant ({chr(945)}={constant_lr})', limits_const)
     scat_accel_h, scat_accel_a, trails_accel_h, trails_accel_a = setup_trajectory_ax(
         ax_nesterov, f'Nesterov ({chr(945)}={accel_lr}, {chr(946)}={accel_momentum})', limits_accel)
+
+    for ax in (ax_const, ax_nesterov):
+        for spec in projection_patch_specs:
+            if spec[0] == 'ball':
+                _, center_xy, r = spec
+                ax.add_patch(Circle(center_xy, r, fill=False, edgecolor='gray', linestyle='--', linewidth=1.5, alpha=0.8, zorder=4))
+            elif spec[0] == 'box':
+                _, (x0, y0), width, height = spec
+                ax.add_patch(Rectangle((x0, y0), width, height, fill=False, edgecolor='gray', linestyle='--', linewidth=1.5, alpha=0.8, zorder=4))
 
     title_text = fig.suptitle('', fontsize=11, y=0.98)
 
