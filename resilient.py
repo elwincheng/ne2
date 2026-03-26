@@ -287,6 +287,7 @@ class Resilient:
                 print(f"Iteration {i} of {self.sim_config.num_iter}, error: {records[-1]:.6f}")
             
             state_y = self.adversarial_communication(state_x)
+            # state_v = self.filter_communicated_message(state_y)
             state_v = remove_d.filter_communicated_message(state_y, self.Go, self.offsets, self.neighbors, self.D)
 
             if self.sim_config.step_method == 'accelerated':
@@ -835,7 +836,8 @@ if __name__ == "__main__":
     parser.add_argument('--save-animation', type=str, default=None, metavar='PATH',
                         help='Save animation to PATH (e.g. animation.gif). Use MPLBACKEND=Agg for headless.')
     parser.add_argument('--frame-skip', type=int, default=10, help='Animation: plot every Nth iteration (default 10)')
-    parser.add_argument('--seed', type=int, default=None, help='RNG seed for reproducible animate-dual-grid runs')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='NumPy RNG seed for reproducible runs (original, adaptive, compare, animate, animate-dual-grid)')
     parser.add_argument('--adversarial-fraction', type=float, default=0.3,
                         help='animate-dual-grid: fraction of random adversarial agents on each grid (default 0.3)')
     parser.add_argument('--dual-improved-lr', type=float, default=0.05,
@@ -877,6 +879,8 @@ if __name__ == "__main__":
             improved_momentum=args.dual_improved_momentum,
         )
     else:
+        if args.seed is not None:
+            np.random.seed(int(args.seed))
         # Create game instance
         if args.grid_width == 15:
             game = Resilient(sim_config, grid_width=15, 
