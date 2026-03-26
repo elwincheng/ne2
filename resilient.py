@@ -614,9 +614,9 @@ def animate_dual_grid_trajectories(
     frame_skip=10,
     seed=None,
     adversarial_fraction=0.3,
-    grid_original=13,
-    grid_improved=32,
-    improved_base_lr=0.05,
+    grid_original=10,
+    grid_improved=25,
+    improved_base_lr=0.025,
     improved_momentum=0.9,
 ):
     """
