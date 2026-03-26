@@ -585,6 +585,194 @@ def animate_position_comparison(game, init_state, num_iter=500, save_path=None, 
     return anim
 
 
+def _sample_random_adversaries(n_agents: int, fraction: float, rng: "np.random.Generator") -> set:
+    """Pick roughly ``fraction * n_agents`` distinct agent indices (at least one if fraction > 0)."""
+    if fraction <= 0 or n_agents <= 0:
+        return set()
+    n_adv = min(n_agents, max(1, round(fraction * n_agents)))
+    chosen = rng.choice(n_agents, size=n_adv, replace=False)
+    return set(int(x) for x in chosen.tolist())
+
+
+def _axis_limits_from_positions(pos_records, n_agents: int):
+    all_x, all_y = [], []
+    for pos in pos_records:
+        p = np.reshape(pos, (-1,))
+        for i in range(n_agents):
+            all_x.append(p[2 * i])
+            all_y.append(p[2 * i + 1])
+    x_min, x_max = min(all_x), max(all_x)
+    y_min, y_max = min(all_y), max(all_y)
+    margin = 0.1 * max(x_max - x_min, y_max - y_min, 1)
+    return x_min - margin, x_max + margin, y_min - margin, y_max + margin
+
+
+def animate_dual_grid_trajectories(
+    num_iter=500,
+    save_path=None,
+    frame_skip=10,
+    seed=None,
+    adversarial_fraction=0.3,
+    grid_original=13,
+    grid_improved=32,
+    improved_base_lr=0.05,
+    improved_momentum=0.9,
+):
+    """
+    Side-by-side GIF: fixed-step on a small grid vs accelerated GRANE on a larger grid,
+    each with ~``adversarial_fraction`` random (noisy) adversarial agents.
+    """
+    if seed is not None:
+        rng_adv = np.random.default_rng(int(seed))
+    else:
+        rng_adv = np.random.default_rng()
+
+    n_left = grid_original**2 - 4
+    n_right = grid_improved**2 - 4
+    adv_left = _sample_random_adversaries(n_left, adversarial_fraction, rng_adv)
+    adv_right = _sample_random_adversaries(n_right, adversarial_fraction, rng_adv)
+
+    sim_left = simulation_config(num_iter=num_iter)
+    sim_right = simulation_config(
+        num_iter=num_iter,
+        step_method='accelerated',
+        adaptive_base_lr=improved_base_lr,
+        accelerated_momentum=improved_momentum,
+    )
+
+    game_left = Resilient(
+        sim_left,
+        grid_width=grid_original,
+        random_agents=adv_left,
+        constant_agents=None,
+        l_inf_ball=1,
+        D=1,
+        corner_size=1,
+    )
+    game_right = Resilient(
+        sim_right,
+        grid_width=grid_improved,
+        random_agents=adv_right,
+        constant_agents=None,
+        l_inf_ball=1,
+        D=1,
+        corner_size=1,
+    )
+
+    if seed is not None:
+        np.random.seed(int(seed))
+    init_left = -7 + 14 * np.random.rand(game_left.dim_state, 1)
+    if seed is not None:
+        np.random.seed(int(seed) + 1_000_003)
+    init_right = -7 + 14 * np.random.rand(game_right.dim_state, 1)
+
+    print(f"Running original (grid={grid_original}, constant step={sim_left.step_size}, |adv|={len(adv_left)})...")
+    if seed is not None:
+        np.random.seed(int(seed) + 2_000_003)
+    err_left, pos_left, _ = game_left.iterate_algo(init_left.copy(), verbose=False)
+
+    print(f"Running improved (grid={grid_improved}, accelerated α={improved_base_lr}, |adv|={len(adv_right)})...")
+    if seed is not None:
+        np.random.seed(int(seed) + 3_000_003)
+    err_right, pos_right, _ = game_right.iterate_algo(init_right.copy(), verbose=False)
+
+    indices = list(range(0, num_iter + 1, frame_skip))
+    if indices[-1] != num_iter:
+        indices.append(num_iter)
+
+    adv_l = game_left.random_agents | game_left.constant_agents
+    adv_r = game_right.random_agents | game_right.constant_agents
+    honest_l = [i for i in range(game_left.N) if i not in adv_l]
+    honest_r = [i for i in range(game_right.N) if i not in adv_r]
+
+    xl0, xl1, yl0, yl1 = _axis_limits_from_positions(pos_left, game_left.N)
+    xr0, xr1, yr0, yr1 = _axis_limits_from_positions(pos_right, game_right.N)
+
+    ne_l = np.ravel(game_left.NE)
+    ne_r = np.ravel(game_right.NE)
+    ne_x_l = [float(ne_l[2 * i]) for i in range(game_left.N)]
+    ne_y_l = [float(ne_l[2 * i + 1]) for i in range(game_left.N)]
+    ne_x_r = [float(ne_r[2 * i]) for i in range(game_right.N)]
+    ne_y_r = [float(ne_r[2 * i + 1]) for i in range(game_right.N)]
+
+    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(12, 6))
+
+    scat_ll_h = ax_left.scatter([], [], c='blue', s=20, alpha=0.7, label='Honest')
+    scat_ll_a = ax_left.scatter([], [], c='red', s=30, alpha=0.8, marker='s', label='Adversarial')
+    scat_lr_h = ax_right.scatter([], [], c='orange', s=8, alpha=0.55, label='Honest')
+    scat_lr_a = ax_right.scatter([], [], c='red', s=12, alpha=0.75, marker='s', label='Adversarial')
+    ax_left.scatter(ne_x_l, ne_y_l, c='darkgreen', s=30, marker='x', label='NE')
+    ax_right.scatter(ne_x_r, ne_y_r, c='darkgreen', s=18, marker='x', label='NE')
+
+    ax_left.set_xlim(xl0, xl1)
+    ax_left.set_ylim(yl0, yl1)
+    ax_right.set_xlim(xr0, xr1)
+    ax_right.set_ylim(yr0, yr1)
+
+    for ax in (ax_left, ax_right):
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.legend(loc='upper right', fontsize=8)
+
+    ax_left.set_title('Original algorithm')
+    ax_right.set_title('Our Improved Algorithm')
+
+    title_text = fig.suptitle('', fontsize=12)
+
+    def init():
+        scat_ll_h.set_offsets(np.empty((0, 2)))
+        scat_ll_a.set_offsets(np.empty((0, 2)))
+        scat_lr_h.set_offsets(np.empty((0, 2)))
+        scat_lr_a.set_offsets(np.empty((0, 2)))
+        return scat_ll_h, scat_ll_a, scat_lr_h, scat_lr_a, title_text
+
+    def update(frame_idx):
+        k = indices[min(frame_idx, len(indices) - 1)]
+        pl = np.reshape(pos_left[k], (-1,))
+        pr = np.reshape(pos_right[k], (-1,))
+
+        xh_l = [pl[2 * i] for i in honest_l]
+        yh_l = [pl[2 * i + 1] for i in honest_l]
+        xa_l = [pl[2 * i] for i in sorted(adv_l)]
+        ya_l = [pl[2 * i + 1] for i in sorted(adv_l)]
+        xh_r = [pr[2 * i] for i in honest_r]
+        yh_r = [pr[2 * i + 1] for i in honest_r]
+        xa_r = [pr[2 * i] for i in sorted(adv_r)]
+        ya_r = [pr[2 * i + 1] for i in sorted(adv_r)]
+
+        scat_ll_h.set_offsets(np.c_[xh_l, yh_l] if honest_l else np.empty((0, 2)))
+        scat_ll_a.set_offsets(np.c_[xa_l, ya_l] if adv_l else np.empty((0, 2)))
+        scat_lr_h.set_offsets(np.c_[xh_r, yh_r] if honest_r else np.empty((0, 2)))
+        scat_lr_a.set_offsets(np.c_[xa_r, ya_r] if adv_r else np.empty((0, 2)))
+
+        title_text.set_text(
+            f'Iteration {k}  |  Original error: {err_left[k]:.2e}  |  Improved error: {err_right[k]:.2e}'
+        )
+        return scat_ll_h, scat_ll_a, scat_lr_h, scat_lr_a, title_text
+
+    n_frames = len(indices)
+    anim = FuncAnimation(
+        fig, update, init_func=init, frames=n_frames, interval=80, blit=True
+    )
+
+    plt.tight_layout()
+
+    if save_path:
+        if not save_path.endswith('.gif'):
+            save_path = save_path + '.gif'
+        print(f"Saving animation to {save_path}...")
+        writer = PillowWriter(fps=15)
+        anim.save(save_path, writer=writer)
+        print("Done.")
+    else:
+        plt.show()
+
+    plt.close()
+    return anim
+
+
 def plot_save_file_data(selected, adversarial):
     pos_records = []
     with open('position_data.txt') as f:
@@ -635,8 +823,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Resilient Nash Equilibrium Seeking Simulation')
-    parser.add_argument('--mode', choices=['original', 'compare', 'adaptive', 'animate'], default='original',
-                        help='Run mode: original, compare, adaptive, or animate (constant vs Nesterov)')
+    parser.add_argument('--mode', choices=['original', 'compare', 'adaptive', 'animate', 'animate-dual-grid'], default='original',
+                        help='Run mode: original, compare, adaptive, animate, or animate-dual-grid (13 vs 32 grid GIF)')
     parser.add_argument('--step-method', choices=['constant', 'adagrad', 'rmsprop', 'adam', 'amsgrad', 'nadam', 'accelerated'], default='adam',
                         help='Step method to use in adaptive mode (accelerated = Nesterov GRANE)')
     parser.add_argument('--base-lr', type=float, default=0.1, help='Base learning rate / step size for adaptive and accelerated methods')
@@ -647,6 +835,13 @@ if __name__ == "__main__":
     parser.add_argument('--save-animation', type=str, default=None, metavar='PATH',
                         help='Save animation to PATH (e.g. animation.gif). Use MPLBACKEND=Agg for headless.')
     parser.add_argument('--frame-skip', type=int, default=10, help='Animation: plot every Nth iteration (default 10)')
+    parser.add_argument('--seed', type=int, default=None, help='RNG seed for reproducible animate-dual-grid runs')
+    parser.add_argument('--adversarial-fraction', type=float, default=0.3,
+                        help='animate-dual-grid: fraction of random adversarial agents on each grid (default 0.3)')
+    parser.add_argument('--dual-improved-lr', type=float, default=0.05,
+                        help='animate-dual-grid: accelerated step size on the large grid (default 0.05)')
+    parser.add_argument('--dual-improved-momentum', type=float, default=0.9,
+                        help='animate-dual-grid: Nesterov momentum on the large grid (default 0.9)')
     args = parser.parse_args()
     
     continue_run = False
@@ -666,90 +861,106 @@ if __name__ == "__main__":
     constant_agents = []
     adversarial = random_agents + constant_agents
 
-    # Create game instance
-    if args.grid_width == 15:
-        game = Resilient(sim_config, grid_width=15, 
-                        random_agents=set([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), 
-                        constant_agents=None, l_inf_ball=2, D=3, corner_size=1)
-    elif args.grid_width == 10:
-        game = Resilient(sim_config, grid_width=10,
-                        random_agents=set([4, 6, 11, 19, 26, 32, 38, 41]),
-                        constant_agents=None, l_inf_ball=2, D=2, corner_size=1)
-    elif args.grid_width == 6:
-        game = Resilient(sim_config, grid_width=6,
-                        random_agents=set([4, 6, 11, 16, 24, 25, 28, 30]),
-                        constant_agents=None, l_inf_ball=2, D=2, corner_size=1)
-    else:
-        game = Resilient(sim_config, grid_width=args.grid_width, 
-                        random_agents=None, constant_agents=None, 
-                        l_inf_ball=1, D=1, corner_size=1)
-
-    if args.mode == 'compare':
-        # Run comparison of all methods
+    if args.mode == 'animate-dual-grid':
+        if not args.save_animation:
+            parser.error('--save-animation is required for animate-dual-grid mode')
         print("\n" + "="*60)
-        print("COMPARING STEP SIZE METHODS")
+        print("ANIMATING: Dual-grid (original vs improved)")
         print("="*60)
-        
-        init_state = -7 + 14*np.random.rand(game.dim_state, 1)
-        
-        # Compare different methods (accelerated = Nesterov-style GRANE)
-        methods = [
-            ('constant', 0.025),   # Original fixed step size
-            ('accelerated', 0.025), # Accelerated GRANE (Nesterov on filtered state)
-            # ('adam', 0.1),
-            # ('amsgrad', 0.1),
-            # ('nadam', 0.1)
-        ]
-        
-        results = compare_step_methods(game, init_state, methods=methods, num_iter=args.num_iter)
-        
-        # Print summary
-        print("\n" + "="*60)
-        print("SUMMARY")
-        print("="*60)
-        for method, errors in results.items():
-            print(f"{method:20s}: Final={errors[-1]:.6f}, Min={min(errors):.6f}")
-        
-        # Plot comparison
-        plot_convergence_comparison(results, 
-                                   title=f"Step Method Comparison (grid={args.grid_width}, iter={args.num_iter})",
-                                   save_path="convergence_comparison")
-        
-    elif args.mode == 'animate':
-        # Animate constant vs Nesterov position comparison
-        print("\n" + "="*60)
-        print("ANIMATING: Constant vs Nesterov")
-        print("="*60)
-        init_state = -7 + 14*np.random.rand(game.dim_state, 1)
-        animate_position_comparison(
-            game, init_state,
+        animate_dual_grid_trajectories(
             num_iter=args.num_iter,
             save_path=args.save_animation,
-            frame_skip=args.frame_skip
+            frame_skip=args.frame_skip,
+            seed=args.seed,
+            adversarial_fraction=args.adversarial_fraction,
+            improved_base_lr=args.dual_improved_lr,
+            improved_momentum=args.dual_improved_momentum,
         )
-        
-    elif args.mode == 'adaptive':
-        # Run with specified adaptive or accelerated method
-        print(f"\nRunning with {args.step_method} (base_lr={args.base_lr})")
-        if args.step_method == 'accelerated':
-            game.set_step_method(args.step_method, args.base_lr, momentum=args.momentum)
-        else:
-            game.set_step_method(args.step_method, args.base_lr)
-        
-        if args.profile:
-            cProfile.run('main(game, sim_config)', sort='cumulative')
-        else:
-            main(game, sim_config)
-        
-        plot_save_file_data(selected, adversarial)
-        
     else:
-        # Original behavior with fixed step size
-        print("\nRunning with original fixed step size")
-        
-        if args.profile:
-            cProfile.run('main(game, sim_config)', sort='cumulative')
+        # Create game instance
+        if args.grid_width == 15:
+            game = Resilient(sim_config, grid_width=15, 
+                            random_agents=set([5, 71, 8, 74, 10, 78, 17, 87, 28, 95, 46, 61]), 
+                            constant_agents=None, l_inf_ball=2, D=3, corner_size=1)
+        elif args.grid_width == 10:
+            game = Resilient(sim_config, grid_width=10,
+                            random_agents=set([4, 6, 11, 19, 26, 32, 38, 41]),
+                            constant_agents=None, l_inf_ball=2, D=2, corner_size=1)
+        elif args.grid_width == 6:
+            game = Resilient(sim_config, grid_width=6,
+                            random_agents=set([4, 6, 11, 16, 24, 25, 28, 30]),
+                            constant_agents=None, l_inf_ball=2, D=2, corner_size=1)
         else:
-            main(game, sim_config)
-        
-        plot_save_file_data(selected, adversarial)
+            game = Resilient(sim_config, grid_width=args.grid_width, 
+                            random_agents=None, constant_agents=None, 
+                            l_inf_ball=1, D=1, corner_size=1)
+
+        if args.mode == 'compare':
+            # Run comparison of all methods
+            print("\n" + "="*60)
+            print("COMPARING STEP SIZE METHODS")
+            print("="*60)
+            
+            init_state = -7 + 14*np.random.rand(game.dim_state, 1)
+            
+            # Compare different methods (accelerated = Nesterov-style GRANE)
+            methods = [
+                ('constant', 0.025),   # Original fixed step size
+                ('accelerated', 0.025), # Accelerated GRANE (Nesterov on filtered state)
+                # ('adam', 0.1),
+                # ('amsgrad', 0.1),
+                # ('nadam', 0.1)
+            ]
+            
+            results = compare_step_methods(game, init_state, methods=methods, num_iter=args.num_iter)
+            
+            # Print summary
+            print("\n" + "="*60)
+            print("SUMMARY")
+            print("="*60)
+            for method, errors in results.items():
+                print(f"{method:20s}: Final={errors[-1]:.6f}, Min={min(errors):.6f}")
+            
+            # Plot comparison
+            plot_convergence_comparison(results, 
+                                       title=f"Step Method Comparison (grid={args.grid_width}, iter={args.num_iter})",
+                                       save_path="convergence_comparison")
+            
+        elif args.mode == 'animate':
+            # Animate constant vs Nesterov position comparison
+            print("\n" + "="*60)
+            print("ANIMATING: Constant vs Nesterov")
+            print("="*60)
+            init_state = -7 + 14*np.random.rand(game.dim_state, 1)
+            animate_position_comparison(
+                game, init_state,
+                num_iter=args.num_iter,
+                save_path=args.save_animation,
+                frame_skip=args.frame_skip
+            )
+            
+        elif args.mode == 'adaptive':
+            # Run with specified adaptive or accelerated method
+            print(f"\nRunning with {args.step_method} (base_lr={args.base_lr})")
+            if args.step_method == 'accelerated':
+                game.set_step_method(args.step_method, args.base_lr, momentum=args.momentum)
+            else:
+                game.set_step_method(args.step_method, args.base_lr)
+            
+            if args.profile:
+                cProfile.run('main(game, sim_config)', sort='cumulative')
+            else:
+                main(game, sim_config)
+            
+            plot_save_file_data(selected, adversarial)
+            
+        else:
+            # Original behavior with fixed step size
+            print("\nRunning with original fixed step size")
+            
+            if args.profile:
+                cProfile.run('main(game, sim_config)', sort='cumulative')
+            else:
+                main(game, sim_config)
+            
+            plot_save_file_data(selected, adversarial)
